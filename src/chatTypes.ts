@@ -43,6 +43,8 @@ export interface ChatConversation {
   openTabPaths?: string[];
   /** True when the last completed turn used ACP/image transport (resume may be unreliable). */
   lastTurnUsedAcp?: boolean;
+  /** Pinned conversations stay at the top of history and resist auto-trim preference. */
+  pinned?: boolean;
   messages: ChatMessage[];
 }
 
@@ -55,6 +57,10 @@ export interface CustomPrompt {
   id: string;
   name: string;
   prompt: string;
+  /** Optional short description shown in / menu and settings. */
+  description?: string;
+  /** Workflow templates get a clearer label in the slash menu. */
+  isWorkflow?: boolean;
 }
 
 export interface ContextSelection {

@@ -21,6 +21,7 @@ await build({
     path.join(root, "src/historyInjection.ts"),
     path.join(root, "src/processTree.ts"),
     path.join(root, "src/runWatchdog.ts"),
+    path.join(root, "src/contextInventory.ts"),
   ],
   outdir: outDir,
   format: "esm",
@@ -61,6 +62,9 @@ const { windowsTaskkillArgs } = await import(
 );
 const { resolveIdleTimeoutMs, RunWatchdog } = await import(
   pathToFileURL(path.join(outDir, "runWatchdog.js")).href
+);
+const { buildContextInventory } = await import(
+  pathToFileURL(path.join(outDir, "contextInventory.js")).href
 );
 
 test("extractCandidate prefers whole-message fenced markdown", () => {
@@ -317,6 +321,23 @@ test("estimateExpansionCap enforces path and folder limits", () => {
   assert.ok(result.expandedPathCount <= CONTEXT_LIMITS.maxExpandedPaths);
 });
 
+test("buildContextInventory exposes removable items and truncation reasons", () => {
+  const inventory = buildContextInventory({
+    includeActiveNote: true,
+    activeNotePath: "Notes/a.md",
+    openTabPaths: ["Notes/b.md"],
+    draftMessage: "@[[c.md]] @{Projects} #work",
+    attachmentCount: 1,
+    expandedPaths: Array.from({ length: 40 }, (_, index) => `Notes/${index}.md`),
+    expansionCapped: true,
+    limits: { maxExpandedPaths: 32, maxFilesPerFolder: 20, maxFilesPerTag: 20 },
+  });
+  assert.equal(inventory.truncated, true);
+  assert.ok(inventory.truncationReasons.some((reason) => reason.includes("展开路径达到上限")));
+  assert.ok(inventory.items.some((item) => item.token === "@[[c.md]]" && item.removable));
+  assert.ok(inventory.items.some((item) => item.kind === "image" && item.removable));
+});
+
 test("rankAtSuggestions prefers recent files for empty query", () => {
   const ranked = rankAtSuggestions(
     [
@@ -400,6 +421,7 @@ test("source wiring: last-markdown tracking, history confirm, diff open, history
   const petView = readFileSync(path.join(root, "src/petView.ts"), "utf8");
   const acp = readFileSync(path.join(root, "src/grokAcpRunner.ts"), "utf8");
   const headless = readFileSync(path.join(root, "src/grokRunner.ts"), "utf8");
+  const contextInventoryModal = readFileSync(path.join(root, "src/contextInventoryModal.ts"), "utf8");
 
   assert.match(main, /active-leaf-change/);
   assert.match(main, /lastMarkdownPath/);
@@ -408,17 +430,40 @@ test("source wiring: last-markdown tracking, history confirm, diff open, history
   assert.match(main, /lastTurnUsedAcp/);
   assert.match(main, /setTurnContextSummary/);
   assert.match(main, /activeNoteChipLabel/);
+  assert.match(main, /refreshDefaultModelPublic/);
+  assert.match(main, /editor-menu/);
+  assert.match(main, /send-editor-selection/);
+  assert.match(main, /writeBackResponse/);
+  assert.match(main, /ContextInventoryModal/);
+  assert.match(main, /testGrokCliPublic/);
+  assert.match(main, /openPluginSettings/);
+  assert.match(main, /removeContextInventoryItem/);
+  assert.match(main, /undoLastApply/);
 
-  assert.match(historyModal, /window\.confirm/);
+  assert.match(historyModal, /ConfirmModal/);
   assert.match(diffModal, /openFile\(firstFile\)/);
+  assert.match(diffModal, /createApplyUndoEntry/);
+  assert.match(diffModal, /grok-diff-status-badge/);
   assert.match(petView, /grok-pet-turn-summary/);
   assert.match(petView, /ensureAtIndex|rankAtSuggestions/);
   assert.match(petView, /invalidateSuggestionIndex/);
+  assert.match(petView, /grok-pet-file-pill/);
+  assert.match(petView, /grok-pet-source-chip/);
+  assert.match(petView, /grok-pet-selection-chip/);
+  assert.match(petView, /grok-pet-jump-latest/);
+  assert.match(petView, /grok-pet-empty-state/);
+  assert.match(petView, /grok-pet-cli-banner/);
+  assert.match(petView, /setPendingUndoAvailable/);
 
   assert.match(acp, /terminateProcessTree/);
   assert.match(acp, /RunWatchdog/);
   assert.match(headless, /terminateProcessTree/);
   assert.match(headless, /RunWatchdog/);
+  assert.match(headless, /testGrokCli/);
+  assert.match(contextInventoryModal, /ContextInventoryModal/);
+  assert.match(contextInventoryModal, /grok-context-inventory/);
+  assert.match(contextInventoryModal, /复制清单/);
+  assert.match(contextInventoryModal, /onRemoveItem/);
 });
 
 test.after(() => {

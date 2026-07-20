@@ -2,6 +2,13 @@ import { App, PluginSettingTab, Setting } from "obsidian";
 import type GrokBuildPlugin from "./main";
 import { resolveGrokBinary } from "./grokRunner";
 import type { CustomPrompt } from "./chatTypes";
+import { createId } from "./chatTypes";
+import {
+  DEFAULT_CONTEXT_LIMITS,
+  type ContextLimitOverrides,
+  mergeContextLimits,
+} from "./contextLimits";
+import { minutesInputToMs, msToMinutesDisplay } from "./timeoutFormat";
 
 export interface GrokBuildSettings {
   /** Absolute path to grok / grok.exe. Empty = auto-detect. */
@@ -20,6 +27,8 @@ export interface GrokBuildSettings {
   /** Delete vault screenshot files when removing attachments / conversations. */
   deleteAttachmentsOnCleanup: boolean;
   customPrompts: CustomPrompt[];
+  /** Optional overrides for vault context caps. */
+  contextLimits?: ContextLimitOverrides;
 }
 
 export const DEFAULT_SETTINGS: GrokBuildSettings = {
@@ -34,10 +43,45 @@ export const DEFAULT_SETTINGS: GrokBuildSettings = {
   historyLimit: 20,
   deleteAttachmentsOnCleanup: true,
   customPrompts: [
-    { id: "summarize", name: "总结", prompt: "请总结下面的内容，提炼关键结论和行动项。" },
-    { id: "polish", name: "润色", prompt: "请把下面的内容润色成清晰、自然的中文 Markdown。" },
-    { id: "translate", name: "翻译", prompt: "请将下面的内容翻译成中文，保留 Markdown 结构。" },
+    {
+      id: "summarize",
+      name: "总结",
+      prompt: "请总结下面的内容，提炼关键结论和行动项。",
+      description: "提炼结论与行动项",
+      isWorkflow: true,
+    },
+    {
+      id: "polish",
+      name: "润色",
+      prompt: "请把下面的内容润色成清晰、自然的中文 Markdown。",
+      description: "润色为清晰中文",
+      isWorkflow: true,
+    },
+    {
+      id: "translate",
+      name: "翻译",
+      prompt: "请将下面的内容翻译成中文，保留 Markdown 结构。",
+      description: "译为中文并保留结构",
+      isWorkflow: true,
+    },
+    {
+      id: "meeting-notes",
+      name: "会议纪要",
+      prompt:
+        "请根据下面的内容整理成会议纪要：议题、讨论要点、决议、待办（负责人/截止日期若可知）。使用清晰 Markdown。",
+      description: "工作流：会议纪要",
+      isWorkflow: true,
+    },
+    {
+      id: "weekly-review",
+      name: "周报复盘",
+      prompt:
+        "请把下面内容整理成周报复盘：本周进展、阻塞、下周计划、风险。条目化，适合直接贴进笔记。",
+      description: "工作流：周报复盘",
+      isWorkflow: true,
+    },
   ],
+  contextLimits: { ...DEFAULT_CONTEXT_LIMITS },
 };
 
 export class GrokBuildSettingTab extends PluginSettingTab {
@@ -54,7 +98,7 @@ export class GrokBuildSettingTab extends PluginSettingTab {
 
     containerEl.createEl("h2", { text: "Grok Obsidian" });
     containerEl.createEl("p", {
-      text: "模型与权限跟随本机 Grok Build / CLI 配置。聊天默认只读（plan），写入仅通过 Diff 确认。",
+      text: "模型与权限跟随本机 Grok Build / CLI 配置。聊天默认只读（plan），写入仅通过 Diff 确认或显式插入笔记。",
       cls: "setting-item-description",
     });
 
@@ -67,10 +111,15 @@ export class GrokBuildSettingTab extends PluginSettingTab {
     } as const;
     new Setting(containerEl)
       .setName("当前 Grok CLI")
-      .setDesc(`${sourceLabels[resolution.source]}：${resolution.path}`)
+      .setDesc(`${sourceLabels[resolution.source]}：${resolution.path}。首次使用请先在终端执行 grok login。`)
       .addButton((button) =>
         button.setButtonText("重新检测").onClick(() => {
-          this.display();
+          void this.plugin.refreshDefaultModelPublic().then(() => this.display());
+        }),
+      )
+      .addButton((button) =>
+        button.setButtonText("测试命令").setCta().onClick(() => {
+          void this.plugin.testGrokCliPublic();
         }),
       );
 
@@ -86,7 +135,7 @@ export class GrokBuildSettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName("对话历史上限")
-      .setDesc("本地最多保留多少个对话。修改后立即生效。")
+      .setDesc("本地最多保留多少个对话（置顶对话优先保留）。修改后立即生效。")
       .addText((text) =>
         text.setValue(String(this.plugin.settings.historyLimit)).onChange(async (value) => {
           const n = Number(value);
@@ -118,29 +167,76 @@ export class GrokBuildSettingTab extends PluginSettingTab {
         }),
       );
 
-    new Setting(containerEl)
-      .setName("斜杠提示词")
-      .setDesc("每行一个：名称=提示词。输入 / 可选择。")
-      .addTextArea((ta) => {
-        ta.setValue(
-          this.plugin.settings.customPrompts.map((item) => `${item.name}=${item.prompt}`).join("\n"),
+    // —— Structured custom prompts / workflows ——
+    containerEl.createEl("h3", { text: "斜杠提示词与工作流" });
+    containerEl.createEl("p", {
+      cls: "setting-item-description",
+      text: "在输入框输入 / 可选用。标记为工作流的条目会在菜单中显示说明。",
+    });
+
+    const prompts = this.plugin.settings.customPrompts ?? [];
+    for (let index = 0; index < prompts.length; index += 1) {
+      const item = prompts[index];
+      const row = containerEl.createDiv({ cls: "grok-settings-prompt-row" });
+      new Setting(row)
+        .setName(item.isWorkflow ? `工作流 · ${item.name || "未命名"}` : item.name || `提示词 ${index + 1}`)
+        .setDesc(item.description || item.prompt.slice(0, 80))
+        .addText((text) => {
+          text.setPlaceholder("名称").setValue(item.name);
+          text.onChange(async (value) => {
+            item.name = value.trim() || item.name;
+            await this.plugin.saveSettings();
+          });
+        })
+        .addToggle((tg) =>
+          tg.setTooltip("工作流").setValue(Boolean(item.isWorkflow)).onChange(async (value) => {
+            item.isWorkflow = value;
+            await this.plugin.saveSettings();
+            this.display();
+          }),
+        )
+        .addButton((btn) =>
+          btn.setButtonText("删除").setWarning().onClick(async () => {
+            this.plugin.settings.customPrompts = prompts.filter((_, i) => i !== index);
+            await this.plugin.saveSettings();
+            this.display();
+          }),
         );
-        ta.inputEl.rows = 5;
-        ta.inputEl.style.width = "100%";
-        ta.onChange(async (value) => {
-          this.plugin.settings.customPrompts = value
-            .split(/\r?\n/)
-            .map((line) => line.trim())
-            .filter(Boolean)
-            .map((line, index) => {
-              const separator = line.indexOf("=");
-              const name = separator > 0 ? line.slice(0, separator).trim() : `提示词 ${index + 1}`;
-              const prompt = separator > 0 ? line.slice(separator + 1).trim() : line;
-              return { id: `custom-${index}`, name, prompt };
-            });
-          await this.plugin.saveSettings();
+      new Setting(row)
+        .setName("说明")
+        .addText((text) => {
+          text.setPlaceholder("可选说明").setValue(item.description ?? "");
+          text.onChange(async (value) => {
+            item.description = value.trim();
+            await this.plugin.saveSettings();
+          });
         });
-      });
+      new Setting(row)
+        .setName("提示词正文")
+        .addTextArea((ta) => {
+          ta.setValue(item.prompt);
+          ta.inputEl.rows = 3;
+          ta.inputEl.style.width = "100%";
+          ta.onChange(async (value) => {
+            item.prompt = value;
+            await this.plugin.saveSettings();
+          });
+        });
+    }
+
+    new Setting(containerEl).addButton((btn) =>
+      btn.setButtonText("添加提示词").setCta().onClick(async () => {
+        this.plugin.settings.customPrompts.push({
+          id: createId("prompt"),
+          name: "新提示词",
+          prompt: "请根据下面的内容……",
+          description: "",
+          isWorkflow: false,
+        });
+        await this.plugin.saveSettings();
+        this.display();
+      }),
+    );
 
     // —— Advanced (collapsed) ——
     const advanced = containerEl.createEl("details", { cls: "grok-settings-advanced" });
@@ -167,27 +263,31 @@ export class GrokBuildSettingTab extends PluginSettingTab {
       );
 
     new Setting(advancedBody)
-      .setName("总超时（毫秒）")
-      .setDesc("整轮请求最长等待时间。最小 10000。")
+      .setName("总超时（分钟）")
+      .setDesc("整轮请求最长等待时间。最小约 0.2 分钟（10 秒）。")
       .addText((text) =>
-        text.setValue(String(this.plugin.settings.timeoutMs)).onChange(async (value) => {
-          const n = Number(value);
-          if (!Number.isFinite(n) || n < 10_000) return;
-          this.plugin.settings.timeoutMs = Math.floor(n);
-          await this.plugin.saveSettings();
-        }),
+        text
+          .setValue(msToMinutesDisplay(this.plugin.settings.timeoutMs))
+          .onChange(async (value) => {
+            const ms = minutesInputToMs(value, 10_000);
+            if (ms == null) return;
+            this.plugin.settings.timeoutMs = ms;
+            await this.plugin.saveSettings();
+          }),
       );
 
     new Setting(advancedBody)
-      .setName("无进度超时（毫秒）")
-      .setDesc("连续无思考/输出进度超过该时间则终止（会被总超时上限截断）。最小 5000，默认 120000。")
+      .setName("无进度超时（分钟）")
+      .setDesc("连续无思考/输出进度超过该时间则终止。最小约 0.1 分钟（5 秒），默认 2 分钟。")
       .addText((text) =>
         text
-          .setValue(String(this.plugin.settings.idleTimeoutMs ?? DEFAULT_SETTINGS.idleTimeoutMs))
+          .setValue(
+            msToMinutesDisplay(this.plugin.settings.idleTimeoutMs ?? DEFAULT_SETTINGS.idleTimeoutMs),
+          )
           .onChange(async (value) => {
-            const n = Number(value);
-            if (!Number.isFinite(n) || n < 5_000) return;
-            this.plugin.settings.idleTimeoutMs = Math.floor(n);
+            const ms = minutesInputToMs(value, 5_000);
+            if (ms == null) return;
+            this.plugin.settings.idleTimeoutMs = ms;
             await this.plugin.saveSettings();
           }),
       );
@@ -225,5 +325,38 @@ export class GrokBuildSettingTab extends PluginSettingTab {
         ta.inputEl.rows = 4;
         ta.inputEl.style.width = "100%";
       });
+
+    advancedBody.createEl("h4", { text: "上下文上限" });
+    advancedBody.createEl("p", {
+      cls: "setting-item-description",
+      text: "控制每轮读入 Vault 的规模；发送与摘要共用同一套限制。",
+    });
+
+    const limits = mergeContextLimits(this.plugin.settings.contextLimits);
+    const limitFields: Array<{ key: keyof typeof DEFAULT_CONTEXT_LIMITS; name: string; desc: string }> = [
+      { key: "maxFilesInMessage", name: "消息内 @ 文件数", desc: "单条消息最多解析的文件提及" },
+      { key: "maxFoldersInMessage", name: "消息内文件夹数", desc: "单条消息最多解析的文件夹提及" },
+      { key: "maxTagsInMessage", name: "消息内标签数", desc: "单条消息最多解析的标签" },
+      { key: "maxExpandedPaths", name: "展开路径总数", desc: "文件夹/标签展开后的最大路径数" },
+      { key: "maxFilesPerFolder", name: "每文件夹文件数", desc: "单个文件夹最多展开的文件" },
+      { key: "maxFilesPerTag", name: "每标签文件数", desc: "单个标签最多展开的文件" },
+      { key: "maxCharsPerFile", name: "单文件字符上限", desc: "每个文件最多读入的字符数" },
+      { key: "maxCharsTotal", name: "总字符上限", desc: "本轮 Vault 正文合计字符上限" },
+    ];
+
+    for (const field of limitFields) {
+      new Setting(advancedBody)
+        .setName(field.name)
+        .setDesc(field.desc)
+        .addText((text) =>
+          text.setValue(String(limits[field.key])).onChange(async (value) => {
+            const n = Number(value);
+            if (!Number.isFinite(n) || n < 1) return;
+            const next = { ...(this.plugin.settings.contextLimits ?? {}), [field.key]: Math.floor(n) };
+            this.plugin.settings.contextLimits = mergeContextLimits(next);
+            await this.plugin.saveSettings();
+          }),
+        );
+    }
   }
 }

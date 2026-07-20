@@ -9,11 +9,20 @@ import {
 } from "obsidian";
 import type { PetStage } from "./grokRunner";
 import type { ChatAttachment, ChatMessage, CustomPrompt } from "./chatTypes";
+import type { ContextInventory } from "./contextInventory";
 import {
   rankAtSuggestions,
   rankTagSuggestions,
   type RankableSuggestion,
 } from "./suggestionRank";
+import {
+  formatStreamingMarkdownPreview,
+  hasMarkdownStructure,
+} from "./streamingMarkdown";
+import {
+  shouldAutoScrollOnUpdate,
+  shouldShowJumpToLatest,
+} from "./scrollPolicy";
 
 export const GROK_PET_VIEW_TYPE = "grok-build-pet-view";
 
@@ -73,6 +82,7 @@ export class GrokPetView extends ItemView {
   private chatEl!: HTMLElement;
   private contextRailEl!: HTMLElement;
   private turnSummaryEl!: HTMLElement;
+  private jumpToLatestBtn!: HTMLButtonElement;
   private mentionMenuEl!: HTMLElement;
   private inputEl!: HTMLTextAreaElement;
   private fileInputEl!: HTMLInputElement;
@@ -93,9 +103,14 @@ export class GrokPetView extends ItemView {
   private customPrompts: CustomPrompt[] = [];
   private activeNotePath: string | null = null;
   private activeNoteChipText = "当前笔记";
+  private selectionChars: number | null = null;
   private turnSummaryLine = "本轮无额外上下文";
   private turnSummaryTruncated = false;
+  private contextInventory: ContextInventory | null = null;
   private openTabs: OpenTabChip[] = [];
+  private cliReady = true;
+  private cliBanner: string | null = null;
+  private pendingUndoAvailable = false;
   /** Cached vault index for @ suggestions (invalidated on vault events). */
   private atIndex: RankableSuggestion[] | null = null;
   private tagIndex: string[] | null = null;
@@ -114,11 +129,17 @@ export class GrokPetView extends ItemView {
   private onDropContext: ((paths: string[]) => void) | null = null;
   private onRemoveAttachment: ((id: string) => void) | null = null;
   private onToggleActiveNote: ((value: boolean) => void) | null = null;
+  private onOpenContextInventory: (() => void) | null = null;
+  private onRefreshCli: (() => void | Promise<void>) | null = null;
+  private onOpenSettings: (() => void | Promise<void>) | null = null;
+  private onTestCli: (() => void | Promise<void>) | null = null;
+  private onUndoLastApply: (() => void | Promise<void>) | null = null;
   private onCopyMessage: ((message: ChatMessage) => void) | null = null;
   private onEditMessage: ((message: ChatMessage) => void) | null = null;
   private onRegenerateMessage: ((message: ChatMessage) => void) | null = null;
   private onRetryMessage: ((message: ChatMessage) => void) | null = null;
   private onApplyMessage: ((message: ChatMessage) => void) | null = null;
+  private onWriteBackMessage: ((action: "insert" | "append" | "create", text: string) => void | Promise<void>) | null = null;
   private onOpenSource: ((path: string) => void) | null = null;
   private onDraftContextChange: (() => void) | null = null;
   private onToggleOpenTab: ((path: string, selected: boolean) => void) | null = null;
@@ -152,11 +173,17 @@ export class GrokPetView extends ItemView {
     onDropContext?: (paths: string[]) => void;
     onRemoveAttachment?: (id: string) => void;
     onToggleActiveNote?: (value: boolean) => void;
+    onOpenContextInventory?: () => void;
+    onRefreshCli?: () => void | Promise<void>;
+    onOpenSettings?: () => void | Promise<void>;
+    onTestCli?: () => void | Promise<void>;
+    onUndoLastApply?: () => void | Promise<void>;
     onCopyMessage?: (message: ChatMessage) => void;
     onEditMessage?: (message: ChatMessage) => void;
     onRegenerateMessage?: (message: ChatMessage) => void;
     onRetryMessage?: (message: ChatMessage) => void;
     onApplyMessage?: (message: ChatMessage) => void;
+    onWriteBackMessage?: (action: "insert" | "append" | "create", text: string) => void | Promise<void>;
     onOpenSource?: (path: string) => void;
     onDraftContextChange?: () => void;
     onToggleOpenTab?: (path: string, selected: boolean) => void;
@@ -170,11 +197,17 @@ export class GrokPetView extends ItemView {
     this.onDropContext = handlers.onDropContext ?? null;
     this.onRemoveAttachment = handlers.onRemoveAttachment ?? null;
     this.onToggleActiveNote = handlers.onToggleActiveNote ?? null;
+    this.onOpenContextInventory = handlers.onOpenContextInventory ?? null;
+    this.onRefreshCli = handlers.onRefreshCli ?? null;
+    this.onOpenSettings = handlers.onOpenSettings ?? null;
+    this.onTestCli = handlers.onTestCli ?? null;
+    this.onUndoLastApply = handlers.onUndoLastApply ?? null;
     this.onCopyMessage = handlers.onCopyMessage ?? null;
     this.onEditMessage = handlers.onEditMessage ?? null;
     this.onRegenerateMessage = handlers.onRegenerateMessage ?? null;
     this.onRetryMessage = handlers.onRetryMessage ?? null;
     this.onApplyMessage = handlers.onApplyMessage ?? null;
+    this.onWriteBackMessage = handlers.onWriteBackMessage ?? null;
     this.onOpenSource = handlers.onOpenSource ?? null;
     this.onDraftContextChange = handlers.onDraftContextChange ?? null;
     this.onToggleOpenTab = handlers.onToggleOpenTab ?? null;
@@ -192,6 +225,33 @@ export class GrokPetView extends ItemView {
   setActiveNoteChipLabel(label: string): void {
     this.activeNoteChipText = label || "当前笔记";
     if (this.activeNoteBtn) this.renderContextRail();
+  }
+
+  setSelectionChars(chars: number | null): void {
+    this.selectionChars = chars && chars > 0 ? chars : null;
+    if (this.contextRailEl) this.renderContextRail();
+  }
+
+  setContextInventory(inventory: ContextInventory): void {
+    this.contextInventory = inventory;
+    if (this.turnSummaryEl) {
+      this.turnSummaryEl.setAttr("title", inventory.line);
+      this.turnSummaryEl.dataset.truncated = inventory.truncated ? "true" : "false";
+    }
+  }
+
+  setCliStatus(ready: boolean, banner: string | null): void {
+    this.cliReady = ready;
+    this.cliBanner = banner;
+    this.updateComposerPlaceholder();
+    if (!this.chatEl) return;
+    if (this.state.messages.length === 0) this.renderChat();
+    else this.renderChat();
+  }
+
+  setPendingUndoAvailable(value: boolean): void {
+    this.pendingUndoAvailable = value;
+    if (this.chatEl && this.state.messages.length > 0) this.renderChat();
   }
 
   setTurnContextSummary(line: string, truncated: boolean): void {
@@ -238,6 +298,7 @@ export class GrokPetView extends ItemView {
 
     this.chatEl = root.createDiv({ cls: "grok-pet-chat" });
     this.chatEl.setAttr("aria-live", "polite");
+    this.chatEl.addEventListener("scroll", () => this.updateJumpToLatestVisibility());
 
     this.dropTargetEl = root.createDiv({ cls: "grok-pet-drop-target", text: "松开以添加到上下文" });
     this.dropTargetEl.hidden = true;
@@ -245,16 +306,25 @@ export class GrokPetView extends ItemView {
     const composerShell = root.createDiv({ cls: "grok-pet-composer-shell" });
     this.mentionMenuEl = composerShell.createDiv({ cls: "grok-pet-mention-menu" });
     this.mentionMenuEl.hidden = true;
-    this.turnSummaryEl = composerShell.createDiv({
+    const summaryRow = composerShell.createDiv({ cls: "grok-pet-summary-row" });
+    this.turnSummaryEl = summaryRow.createEl("button", {
       cls: "grok-pet-turn-summary",
+      attr: { type: "button", title: "查看本轮上下文明细" },
       text: this.turnSummaryLine,
     });
+    this.turnSummaryEl.addEventListener("click", () => this.onOpenContextInventory?.());
+    this.jumpToLatestBtn = summaryRow.createEl("button", {
+      cls: "grok-pet-jump-latest clickable-icon",
+      attr: { type: "button", title: "跳到最新" },
+    });
+    setIcon(this.jumpToLatestBtn, "arrow-down");
+    this.jumpToLatestBtn.addEventListener("click", () => this.scrollChatToBottom(true));
     this.contextRailEl = composerShell.createDiv({ cls: "grok-pet-context-rail" });
 
     const composer = composerShell.createDiv({ cls: "grok-pet-composer" });
     this.inputEl = composer.createEl("textarea", {
       cls: "grok-pet-input",
-      attr: { rows: "1", placeholder: "消息", "aria-label": "消息" },
+      attr: { rows: "1", placeholder: "", "aria-label": "消息" },
     });
     this.inputEl.addEventListener("input", () => {
       this.resizeInput();
@@ -301,6 +371,8 @@ export class GrokPetView extends ItemView {
     this.renderChat();
     this.renderContextRail();
     this.renderStatus();
+    this.updateComposerPlaceholder();
+    this.updateJumpToLatestVisibility();
     this.onDraftContextChange?.();
   }
 
@@ -346,6 +418,8 @@ export class GrokPetView extends ItemView {
   }
 
   addChatMessage(message: ChatMessage): void {
+    const wasEmpty = this.state.messages.length === 0;
+    const shouldStick = this.shouldAutoScroll();
     this.state.messages.push(message);
     if (this.state.messages.length > 240) {
       const dropped = this.state.messages.length - 240;
@@ -356,14 +430,18 @@ export class GrokPetView extends ItemView {
         return;
       }
     }
-    this.appendMessageNode(message);
-    this.scrollChatToBottom();
+    if (wasEmpty) {
+      this.renderChat();
+      return;
+    }
+    this.appendMessageNode(message, shouldStick);
   }
 
   updateChatMessage(id: string, patch: Partial<ChatMessage>): void {
     const message = this.state.messages.find((item) => item.id === id);
     if (!message) return;
     const prevStatus = message.status;
+    const shouldStick = this.shouldAutoScroll();
     Object.assign(message, patch);
 
     const node = this.messageNodeMap.get(id);
@@ -378,8 +456,11 @@ export class GrokPetView extends ItemView {
       patch.status !== "error" &&
       patch.status !== "cancelled"
     ) {
-      node.textEl.setText(message.text || "…");
-      this.scrollChatToBottom();
+      node.textEl.setText(formatStreamingMarkdownPreview(message.text || "…"));
+      if (hasMarkdownStructure(message.text || "")) node.row.classList.add("has-markdown-structure");
+      else node.row.classList.remove("has-markdown-structure");
+      if (shouldStick) this.scrollChatToBottom(true);
+      else this.updateJumpToLatestVisibility();
       return;
     }
 
@@ -388,7 +469,8 @@ export class GrokPetView extends ItemView {
       const next = this.buildMessageRow(message);
       node.row.replaceWith(next.row);
       this.messageNodeMap.set(id, next);
-      this.scrollChatToBottom();
+      if (shouldStick) this.scrollChatToBottom(true);
+      else this.updateJumpToLatestVisibility();
       return;
     }
     this.renderChat();
@@ -748,6 +830,12 @@ export class GrokPetView extends ItemView {
     this.activeNoteBtn.addEventListener("click", () =>
       this.onToggleActiveNote?.(!this.state.includeActiveNote),
     );
+    if (this.selectionChars && this.selectionChars > 0) {
+      const selectionChip = this.contextRailEl.createDiv({ cls: "grok-pet-selection-chip" });
+      const icon = selectionChip.createSpan();
+      setIcon(icon, "scan-text");
+      selectionChip.createSpan({ text: `选区 ${this.selectionChars} 字` });
+    }
     // Open markdown tabs (select up to 3 as extra context).
     for (const tab of this.openTabs) {
       const chip = this.contextRailEl.createEl("button", {
@@ -831,16 +919,23 @@ export class GrokPetView extends ItemView {
     );
   }
 
-  private scrollChatToBottom(): void {
+  private scrollChatToBottom(force = false): void {
     if (!this.chatEl) return;
+    if (!force && !this.shouldAutoScroll()) {
+      this.updateJumpToLatestVisibility();
+      return;
+    }
     this.chatEl.scrollTop = this.chatEl.scrollHeight;
+    this.updateJumpToLatestVisibility();
   }
 
-  private appendMessageNode(message: ChatMessage): void {
+  private appendMessageNode(message: ChatMessage, autoScroll = true): void {
     if (!this.chatEl) return;
     const node = this.buildMessageRow(message);
     this.chatEl.appendChild(node.row);
     this.messageNodeMap.set(message.id, node);
+    if (autoScroll) this.scrollChatToBottom(true);
+    else this.updateJumpToLatestVisibility();
   }
 
   private buildMessageRow(message: ChatMessage): {
@@ -901,7 +996,8 @@ export class GrokPetView extends ItemView {
     } else if (message.role === "user") {
       this.renderUserText(textEl, message.text);
     } else {
-      textEl.setText(message.text || (message.thoughtText ? "" : "…"));
+      textEl.setText(formatStreamingMarkdownPreview(message.text || (message.thoughtText ? "" : "…")));
+      if (hasMarkdownStructure(message.text || "")) row.classList.add("has-markdown-structure");
     }
 
     if (message.role === "assistant" && message.model) {
@@ -927,7 +1023,10 @@ export class GrokPetView extends ItemView {
     if (message.sources?.length) {
       const sources = body.createDiv({ cls: "grok-pet-sources" });
       for (const source of message.sources) {
-        const button = sources.createEl("button", { attr: { title: source.path } });
+        const button = sources.createEl("button", {
+          cls: "grok-pet-source-chip",
+          attr: { type: "button", title: source.path },
+        });
         setIcon(
           button,
           source.kind === "tag"
@@ -948,6 +1047,12 @@ export class GrokPetView extends ItemView {
         this.onCopyMessage?.(message),
       );
       copy.addClass("grok-pet-message-action");
+      if (this.pendingUndoAvailable) {
+        const undo = this.makeIconButton(actions, "undo-2", "撤销上次应用", () =>
+          this.onUndoLastApply?.(),
+        );
+        undo.addClass("grok-pet-message-action");
+      }
       if (message.status === "error") {
         const retry = this.makeIconButton(actions, "rotate-cw", "用同一上下文重试", () =>
           this.onRetryMessage?.(message),
@@ -961,6 +1066,18 @@ export class GrokPetView extends ItemView {
       }
       if (message.status === "complete" || message.status === "cancelled") {
         if (message.text.trim()) {
+          const insert = this.makeIconButton(actions, "corner-down-left", "插入到当前笔记", () =>
+            this.onWriteBackMessage?.("insert", message.text),
+          );
+          const append = this.makeIconButton(actions, "list-plus", "追加到当前笔记", () =>
+            this.onWriteBackMessage?.("append", message.text),
+          );
+          const create = this.makeIconButton(actions, "file-plus", "新建笔记", () =>
+            this.onWriteBackMessage?.("create", message.text),
+          );
+          insert.addClass("grok-pet-message-action");
+          append.addClass("grok-pet-message-action");
+          create.addClass("grok-pet-message-action");
           const apply = this.makeIconButton(actions, "file-diff", "预览并应用文件更改", () =>
             this.onApplyMessage?.(message),
           );
@@ -984,12 +1101,20 @@ export class GrokPetView extends ItemView {
 
   private renderChat(): void {
     if (!this.chatEl) return;
+    if (this.state.messages.length === 0) {
+      this.messageNodeMap.clear();
+      this.renderEmptyState();
+      return;
+    }
+    const shouldStick = this.shouldAutoScroll();
     this.chatEl.empty();
     this.messageNodeMap.clear();
+    this.renderCliBanner();
     for (const message of this.state.messages) {
-      this.appendMessageNode(message);
+      this.appendMessageNode(message, false);
     }
-    this.scrollChatToBottom();
+    if (shouldStick) this.scrollChatToBottom(true);
+    else this.updateJumpToLatestVisibility();
   }
 
   private renderUserText(container: HTMLElement, text: string): void {
@@ -1005,14 +1130,86 @@ export class GrokPetView extends ItemView {
       const label = tag
         ? `#${tag}`
         : `@${(raw.split("/").pop() ?? raw).replace(/\.[^.]+$/, "")}`;
-      container.createSpan({
-        cls: "grok-pet-file-pill",
-        text: label,
-        attr: { title: raw },
+      const pill = container.createEl("button", {
+        cls: "grok-pet-file-pill grok-pet-source-chip",
+        attr: { type: "button", title: raw },
       });
+      setIcon(pill, tag ? "hash" : raw.includes("/") ? "folder" : "file-text");
+      pill.createSpan({ text: label });
+      pill.addEventListener("click", () => this.onOpenSource?.(tag ? `#${tag}` : raw));
       cursor = index + match[0].length;
     }
     if (cursor < text.length) container.appendText(text.slice(cursor));
+  }
+
+  private shouldAutoScroll(): boolean {
+    if (!this.chatEl) return true;
+    return shouldAutoScrollOnUpdate({
+      scrollTop: this.chatEl.scrollTop,
+      clientHeight: this.chatEl.clientHeight,
+      scrollHeight: this.chatEl.scrollHeight,
+    });
+  }
+
+  private updateJumpToLatestVisibility(): void {
+    if (!this.jumpToLatestBtn || !this.chatEl) return;
+    const metrics = {
+      scrollTop: this.chatEl.scrollTop,
+      clientHeight: this.chatEl.clientHeight,
+      scrollHeight: this.chatEl.scrollHeight,
+    };
+    this.jumpToLatestBtn.hidden = !shouldShowJumpToLatest(metrics, this.state.messages.length > 0);
+  }
+
+  private updateComposerPlaceholder(): void {
+    if (!this.inputEl) return;
+    this.inputEl.placeholder = this.cliReady
+      ? this.state.includeActiveNote
+        ? "输入消息，@ 选文件，# 选标签，/ 选提示词"
+        : "输入消息，@ 选文件，# 选标签，/ 选提示词（可在左侧开启当前笔记）"
+      : "先安装并登录 grok，再发送消息";
+  }
+
+  private renderEmptyState(): void {
+    if (!this.chatEl) return;
+    this.chatEl.empty();
+    if (!this.cliReady) {
+      this.renderCliBanner();
+    }
+    const empty = this.chatEl.createDiv({ cls: "grok-pet-empty-state" });
+    empty.createDiv({
+      cls: "grok-pet-empty-title",
+      text: this.cliReady ? "开始一个新对话" : "CLI 尚未就绪",
+    });
+    empty.createDiv({
+      cls: "grok-pet-empty-text",
+      text: this.cliReady
+        ? "输入消息，或用 @、#、/ 选择上下文与工作流。"
+        : this.cliBanner || "请先安装并登录 grok。",
+    });
+    if (this.cliReady) {
+      empty.createDiv({
+        cls: "grok-pet-empty-hint",
+        text: "你也可以拖入图片、粘贴截图，或从右上角打开历史对话。",
+      });
+    }
+    this.updateJumpToLatestVisibility();
+  }
+
+  private renderCliBanner(): void {
+    if (!this.chatEl || this.cliReady) return;
+    const banner = this.chatEl.createDiv({ cls: "grok-pet-cli-banner" });
+    banner.createDiv({
+      cls: "grok-pet-cli-banner-text",
+      text: this.cliBanner || "未检测到 grok。请先安装并登录 Grok CLI。",
+    });
+    const actions = banner.createDiv({ cls: "grok-pet-cli-banner-actions" });
+    const retry = actions.createEl("button", { text: "重新检测", attr: { type: "button" } });
+    retry.addEventListener("click", () => void this.onRefreshCli?.());
+    const settings = actions.createEl("button", { text: "打开设置", attr: { type: "button" } });
+    settings.addEventListener("click", () => void this.onOpenSettings?.());
+    const test = actions.createEl("button", { cls: "mod-cta", text: "测试命令", attr: { type: "button" } });
+    test.addEventListener("click", () => void this.onTestCli?.());
   }
 
   private renderStatus(): void {
@@ -1027,6 +1224,7 @@ export class GrokPetView extends ItemView {
     this.historyBtn.disabled = running;
     this.attachBtn.disabled = running;
     this.inputEl.disabled = running;
+    this.updateComposerPlaceholder();
     if (running) this.closeSuggestionMenu();
     this.actionBtn.empty();
     setIcon(this.actionBtn, running ? "square" : "arrow-up");

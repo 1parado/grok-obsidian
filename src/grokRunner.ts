@@ -142,6 +142,71 @@ export async function detectDefaultGrokModel(
   });
 }
 
+export async function testGrokCli(
+  settings: Pick<GrokBuildSettings, "grokPath">,
+  timeoutMs = 8_000,
+): Promise<{ ok: true; message: string } | { ok: false; message: string }> {
+  const resolution = resolveGrokBinary(settings);
+  if (!resolution.found) {
+    return {
+      ok: false,
+      message: `未检测到 grok：${resolution.path}。请先安装 Grok CLI，执行 grok login，或在设置中填写绝对路径。`,
+    };
+  }
+
+  return new Promise((resolve) => {
+    let output = "";
+    let settled = false;
+    const finish = (ok: boolean, message: string) => {
+      if (settled) return;
+      settled = true;
+      resolve(ok ? { ok: true, message } : { ok: false, message });
+    };
+
+    let child: ChildProcessWithoutNullStreams;
+    try {
+      child = spawn(resolution.path, ["-p", "hi", "--output-format", "plain"], {
+        env: { ...process.env },
+        windowsHide: true,
+        shell: false,
+      });
+    } catch (error) {
+      finish(false, `无法启动 grok：${error instanceof Error ? error.message : String(error)}`);
+      return;
+    }
+
+    const timer = setTimeout(() => {
+      terminateProcessTree(child);
+      finish(false, "grok 测试超时。若首次使用，请确认已在终端执行 grok login。");
+    }, timeoutMs);
+
+    child.stdout.setEncoding("utf8");
+    child.stderr.setEncoding("utf8");
+    child.stdout.on("data", (chunk: string) => {
+      output += chunk;
+    });
+    child.stderr.on("data", (chunk: string) => {
+      output += chunk;
+    });
+    child.once("error", (error) => {
+      clearTimeout(timer);
+      finish(false, `grok 测试失败：${error.message}`);
+    });
+    child.once("close", (code) => {
+      clearTimeout(timer);
+      const trimmed = output.trim();
+      if (code === 0) {
+        finish(true, `grok CLI 可用：${resolution.path}`);
+      } else {
+        finish(
+          false,
+          `grok 测试退出码 ${code ?? "未知"}。请确认已执行 grok login。${trimmed ? `\n${trimmed.slice(0, 500)}` : ""}`,
+        );
+      }
+    });
+  });
+}
+
 function buildArgs(
   promptFile: string,
   settings: GrokBuildSettings,

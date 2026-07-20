@@ -2,18 +2,17 @@ import {
   parseContextSelection,
   type ParsedContextSelection,
 } from "./contextParse";
+import {
+  DEFAULT_CONTEXT_LIMITS,
+  mergeContextLimits,
+  type ContextLimits,
+} from "./contextLimits";
 
-/** Shared vault-context caps used by the plugin and UI summary. */
-export const CONTEXT_LIMITS = {
-  maxFilesInMessage: 8,
-  maxFoldersInMessage: 4,
-  maxTagsInMessage: 6,
-  maxExpandedPaths: 32,
-  maxFilesPerFolder: 20,
-  maxFilesPerTag: 20,
-  maxCharsPerFile: 50_000,
-  maxCharsTotal: 180_000,
-} as const;
+/** @deprecated Prefer mergeContextLimits / DEFAULT_CONTEXT_LIMITS from contextLimits. */
+export const CONTEXT_LIMITS = DEFAULT_CONTEXT_LIMITS;
+
+export type { ContextLimits };
+export { DEFAULT_CONTEXT_LIMITS, mergeContextLimits } from "./contextLimits";
 
 export interface TurnContextSummaryInput {
   includeActiveNote: boolean;
@@ -26,6 +25,9 @@ export interface TurnContextSummaryInput {
   expansionCapped: boolean;
   /** True if file body content was cut by per-file or total char limits (set after read when known). */
   contentTruncated?: boolean;
+  /** Optional selection character count for summary line. */
+  selectionChars?: number;
+  limits?: Partial<ContextLimits>;
 }
 
 export interface TurnContextSummary {
@@ -41,10 +43,11 @@ export interface TurnContextSummary {
 }
 
 export function summarizeTurnContext(input: TurnContextSummaryInput): TurnContextSummary {
+  const limits = mergeContextLimits(input.limits);
   const selection = parseContextSelection(input.draftMessage, {
-    files: CONTEXT_LIMITS.maxFilesInMessage,
-    folders: CONTEXT_LIMITS.maxFoldersInMessage,
-    tags: CONTEXT_LIMITS.maxTagsInMessage,
+    files: limits.maxFilesInMessage,
+    folders: limits.maxFoldersInMessage,
+    tags: limits.maxTagsInMessage,
   });
 
   const rawFiles = countRawMentions(input.draftMessage, /@\[\[([^\]]+)\]\]/g);
@@ -60,7 +63,7 @@ export function summarizeTurnContext(input: TurnContextSummaryInput): TurnContex
     Boolean(input.expansionCapped) ||
     Boolean(input.contentTruncated) ||
     mentionCapped ||
-    input.expandedPathCount >= CONTEXT_LIMITS.maxExpandedPaths;
+    input.expandedPathCount >= limits.maxExpandedPaths;
 
   const activeNoteLabel =
     input.includeActiveNote && input.activeNotePath
@@ -77,8 +80,11 @@ export function summarizeTurnContext(input: TurnContextSummaryInput): TurnContex
   if (selection.folderPaths.length) parts.push(`文件夹 ${selection.folderPaths.length}`);
   if (selection.tags.length) parts.push(`标签 ${selection.tags.length}`);
   if (input.attachmentCount > 0) parts.push(`图 ${input.attachmentCount}`);
+  if (input.selectionChars && input.selectionChars > 0) {
+    parts.push(`选区 ${input.selectionChars}`);
+  }
   if (input.expandedPathCount > 0) {
-    parts.push(`展开 ${input.expandedPathCount}/${CONTEXT_LIMITS.maxExpandedPaths}`);
+    parts.push(`展开 ${input.expandedPathCount}/${limits.maxExpandedPaths}`);
   }
   if (truncated) parts.push("已截断");
 
@@ -95,27 +101,33 @@ export function summarizeTurnContext(input: TurnContextSummaryInput): TurnContex
 }
 
 /** Pure estimate of expansion caps without vault I/O. */
-export function estimateExpansionCap(selection: ParsedContextSelection, folderHits: number[], tagHits: number[]): {
+export function estimateExpansionCap(
+  selection: ParsedContextSelection,
+  folderHits: number[],
+  tagHits: number[],
+  limitsInput?: Partial<ContextLimits>,
+): {
   expandedPathCount: number;
   expansionCapped: boolean;
 } {
+  const limits = mergeContextLimits(limitsInput);
   let count = selection.filePaths.length;
   let capped = false;
 
   for (const hits of folderHits) {
-    const taken = Math.min(hits, CONTEXT_LIMITS.maxFilesPerFolder);
-    if (hits > CONTEXT_LIMITS.maxFilesPerFolder) capped = true;
+    const taken = Math.min(hits, limits.maxFilesPerFolder);
+    if (hits > limits.maxFilesPerFolder) capped = true;
     count += taken;
   }
   for (const hits of tagHits) {
-    const taken = Math.min(hits, CONTEXT_LIMITS.maxFilesPerTag);
-    if (hits > CONTEXT_LIMITS.maxFilesPerTag) capped = true;
+    const taken = Math.min(hits, limits.maxFilesPerTag);
+    if (hits > limits.maxFilesPerTag) capped = true;
     count += taken;
   }
 
-  if (count > CONTEXT_LIMITS.maxExpandedPaths) {
+  if (count > limits.maxExpandedPaths) {
     capped = true;
-    count = CONTEXT_LIMITS.maxExpandedPaths;
+    count = limits.maxExpandedPaths;
   }
 
   return { expandedPathCount: count, expansionCapped: capped };

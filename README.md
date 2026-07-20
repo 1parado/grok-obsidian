@@ -1,111 +1,110 @@
 # Grok Obsidian
 
-在 **桌面端 Obsidian** 中调用本机 **Grok CLI**，通过极简的 **Grok Obsidian** 侧边面板直接对话。
+在 **桌面端 Obsidian** 中调用本机 **Grok CLI**，通过右侧聊天面板和 Vault 笔记、图片、标签、文件夹上下文对话，并在确认后安全写回笔记。
 
-> **Desktop only** · 需要本机已安装并登录 `grok`。
+> Desktop only · 需要本机已安装 Grok CLI，并先在终端执行 `grok login`。
 
-## 功能
+学 AI，上 L 站：[https://linux.do/](https://linux.do/)
 
-- **Grok Obsidian 面板**：使用项目 `icon.png`、精简状态提示、当前模型名称与 Markdown 消息展示
-- **直接聊天**：在侧边栏发送消息，并在同一 session 中继续追问；回答支持流式显示（增量更新，避免整表重绘）
-- **图片理解**：粘贴截图、点击回形针上传，或拖入图片；图片会转为 PNG 并保存到 Vault 附件目录
-- **上下文选择**：输入 `@` 选择文件或文件夹，输入 `#` 选择标签（支持层级匹配），输入 `/` 选择自定义提示词
-- **活动笔记开关**：明确控制当前笔记是否作为上下文发送
-- **历史与操作**：对话、session ID 和附件路径持久化；支持编辑/复制、重新生成、停止、历史切换与删除
-- **附件清理**：删除对话或移除待发送图片时可清理 `Grok Screenshot` 附件；设置中可一键清理孤立截图
-- **错误可见**：模型错误、非零退出和超时会终止任务，并在对应回答下保留可展开的错误详情
-- **安全修改**：文本与图片会话均默认 `plan` 权限；“Diff” 支持**多文件**与**局部 SEARCH/REPLACE**，预览后勾选再应用
-- **来源跳转**：回答下方的文件、文件夹和标签来源可点击打开
+## 能做什么
 
-## 安装（开发）
+- **侧边栏聊天**：连续对话、流式输出、停止生成、重新生成、失败重试、复制、编辑用户消息后重发。
+- **Markdown 渲染**：流式阶段使用轻量文本预览，完成后交给 Obsidian MarkdownRenderer 渲染。
+- **Vault 上下文**：输入 `@` 搜索文件/文件夹，输入 `#` 搜索标签，输入 `/` 使用自定义提示词或工作流。
+- **当前笔记与选区**：可切换是否附带当前笔记；编辑器有选区时会显示可见 chip 并随请求发送。
+- **打开标签上下文**：可额外选择最多 3 个已打开的 Markdown 标签页作为上下文。
+- **本轮上下文明细**：点击输入框上方摘要，可查看本轮包含的笔记、标签、图片、选区、展开路径和截断原因；支持复制清单和移除单项上下文。
+- **图片理解**：支持粘贴截图、上传图片、拖入图片；图片保存到 Vault 附件目录后通过 ACP image blocks 发送。
+- **安全写回**：回答可插入到当前光标、追加到当前笔记或新建笔记；插入/追加前会显示目标文件名并确认。
+- **Diff 应用**：支持多文件、全文替换、新建文件、SEARCH/REPLACE 局部修改；预览后逐个或批量应用。
+- **应用后撤销**：Diff 应用后会在 Notice 和消息动作区提供短时间 Undo。
+- **历史管理**：本地多会话、全文搜索、置顶、重命名、导出 Markdown、删除确认。
+- **CLI 引导**：检测不到 `grok` 时会显示横幅，可重新检测、打开设置或测试命令。
+
+## 给普通用户安装
+
+将插件目录放入你的 Vault：
+
+```text
+<你的 Vault>/.obsidian/plugins/obsidian-grok-build/
+```
+
+目录内至少需要：
+
+```text
+manifest.json
+main.js
+styles.css
+icon.png
+```
+
+然后在 Obsidian 中启用：
+
+1. 打开 Obsidian 设置。
+2. 进入「社区插件」。
+3. 关闭安全模式。
+4. 在已安装插件中启用 **Grok Obsidian**。
+5. 命令面板运行 `Open Grok Obsidian`。
+
+## 首次配置
+
+1. 确认终端中可以运行：
 
 ```bash
-cd /path/to/obsidian-grok-build
-npm install
-npm run build
-npm test
+grok -p "hi" --output-format plain
 ```
 
-将整个目录复制或联接到：
+2. 如果还没登录，先运行：
+
+```bash
+grok login
+```
+
+3. 插件默认会依次检测：
+
+- `~/.grok/bin/grok` 或 `~/.grok/bin/grok.exe`
+- Obsidian 进程可见的系统 `PATH`
+- 设置页中手动填写的 Grok 可执行文件路径
+
+4. 如果面板显示「CLI 尚未就绪」，可以在横幅中：
+
+- 点「重新检测」
+- 点「打开设置」填写绝对路径
+- 点「测试命令」执行轻量 CLI 检查
+
+## 基本使用
+
+- `Enter` 发送，`Shift+Enter` 换行。
+- 输入 `@`：搜索文件或文件夹。
+- 输入 `#`：搜索标签，支持层级标签匹配。
+- 输入 `/`：选择提示词或工作流模板。
+- 点击「当前笔记」chip：开启/关闭活动笔记上下文。
+- 点击「本轮上下文」摘要：查看上下文明细、复制清单或移除上下文。
+- 粘贴截图、拖入图片或点击回形针：添加图片附件。
+- 在编辑器中选中文字后：
+  - 命令面板运行 `Grok Obsidian: send editor selection`
+  - 或右键菜单选择「发送选区到 Grok Obsidian」
+
+## 写回笔记
+
+回答下方的操作按钮支持：
+
+- **插入到当前笔记**：写入当前光标位置。
+- **追加到当前笔记**：写到目标笔记末尾；如果当前面板抢走焦点，会使用最近聚焦的 Markdown 笔记。
+- **新建笔记**：在当前笔记同目录下创建 `原笔记名 - Grok.md`。
+- **预览并应用文件更改**：打开 Diff 审批窗口。
+
+插入和追加前会显示目标文件名，例如：
 
 ```text
-<你的库>/.obsidian/plugins/obsidian-grok-build/
+将写入：Notes/plan.md
 ```
 
-需包含：
+## Diff 输出格式
 
-- `manifest.json`
-- `main.js`（build 产物）
-- `styles.css`
-- `icon.png`
+模型回答如果包含下面格式，插件可以解析为可审批文件更改。
 
-然后：Obsidian → 设置 → 社区插件 → 关闭安全模式 → 启用 **Grok Obsidian**。
-
-### Windows 联接示例
-
-```powershell
-# 在库的 plugins 目录下创建目录联接
-New-Item -ItemType Junction `
-  -Path "D:\MyVault\.obsidian\plugins\obsidian-grok-build" `
-  -Target "E:\obsidian-plugin\obsidian-grok-build"
-```
-
-## 使用
-
-1. 确认终端可运行：`grok -p "hi" --output-format plain`
-2. 打开右侧 Grok Obsidian，在输入框中直接发送消息（`Enter` 发送，`Shift+Enter` 换行）
-3. 输入 `@` 后搜索文件；使用方向键选择，按 `Enter` / `Tab` 插入，按 `Esc` 关闭
-4. 也可以打开命令面板：
-   - `Open Grok Obsidian`
-   - `Grok Obsidian: start a new conversation`
-   - `Grok Obsidian: clean up orphan screenshots`
-5. 右侧 **Grok Obsidian** 会显示聊天记录；运行时发送按钮会切换成停止按钮
-6. 插件默认自动检测 `~/.grok/bin/grok(.exe)` 和系统 `PATH`；需要时可在设置中覆盖路径
-7. 鼠标移到消息下方可复制；用户消息还可以点铅笔图标回填编辑，该消息之后的旧分支会被移除
-
-## 设置说明
-
-**常用**
-
-| 项 | 默认 | 含义 |
-|----|------|------|
-| 当前 Grok CLI | 自动探测 | 显示检测到的可执行文件 |
-| 默认附带当前笔记 | 开 | 新对话默认带上最近聚焦笔记 |
-| 对话历史上限 | 20 | 本地保留的对话数量（立即生效） |
-| 清理时删除截图附件 | 开 | 删除对话/移除图片时清理 Vault 截图 |
-| 斜杠提示词 | 总结/润色/翻译 | 可自定义常用提示词 |
-
-**模型**：始终使用本机 Grok Build / CLI 默认模型（插件不再提供覆盖项）。
-
-**高级**（折叠）：自定义 grok 路径、超时、最大回合数、禁用工具、额外 rules。
-
-## 原理
-
-```text
-文本回合:
-  grok --prompt-file <tmp> --cwd <vault> --output-format streaming-json --permission-mode plan ...
-图片回合 (ACP):
-  grok --permission-mode plan --max-turns N --rules ... agent stdio
-  session/resume（若有）或 session/new + image content blocks
-解析流:
-  thought → 「思考中」
-  text    → 「回复中」+ 增量 UI
-  end     → 完成 / Markdown 渲染
-```
-
-## 限制
-
-- 不支持移动端
-- 依赖本机 grok 登录态 / 网络
-- Diff 解析格式见下方；SEARCH 必须在目标文件中**唯一匹配**，否则拒绝该局部修改
-- 上下文默认上限：文件 8、文件夹 4、标签 6、总路径 32；单文件约 50KB、总计约 180KB
-- 图片 ACP 会话与 headless session 可能不在同一 ID 空间；图片回合会注入近期对话文本作为补偿
-- 若关闭「清理时删除截图附件」，删除对话不会清理 Vault 中的截图
-- 若 Obsidian 进程 PATH 不含 grok，请填绝对路径
-
-## Diff 格式（模型输出约定）
-
-**全文替换 / 新建（可多文件）：**
+### 全文替换 / 新建
 
 ````markdown
 ```md:Notes/a.md
@@ -117,7 +116,7 @@ New-Item -ItemType Junction `
 ```
 ````
 
-或标题 + 代码块：
+或：
 
 ````markdown
 ### Notes/a.md
@@ -126,26 +125,89 @@ New-Item -ItemType Junction `
 ```
 ````
 
-**局部修改：**
+### 局部修改
 
 ```markdown
 ### Notes/a.md
 <<<<<<< SEARCH
-旧文本（须在文件中只出现一次）
+旧文本（必须在目标文件中只出现一次）
 =======
 新文本
 >>>>>>> REPLACE
 ```
 
-若回答里没有带路径的变更块，会回退为「用整段内容替换当前活动笔记」。
+SEARCH/REPLACE 失败时，插件会明确显示：
+
+- SEARCH 未匹配
+- SEARCH 匹配多处
+- 目标文件不存在
+
+如果回答里没有可解析的文件更改，Diff 窗口会提供兜底操作：插入到光标、追加到当前笔记、新建笔记。
+
+## 设置说明
+
+**常用**
+
+| 项 | 默认 | 含义 |
+|----|------|------|
+| 当前 Grok CLI | 自动检测 | 显示检测路径，并可重新检测或测试命令 |
+| 默认附带当前笔记 | 开 | 新对话默认带上最近聚焦的 Markdown 笔记 |
+| 对话历史上限 | 20 | 本地最多保留多少个对话；置顶对话优先保留 |
+| 清理时删除截图附件 | 开 | 删除对话或移除图片时清理插件管理的截图 |
+| 斜杠提示词与工作流 | 总结/润色/翻译等 | 可增删、编辑描述、标记工作流 |
+
+**高级**
+
+| 项 | 默认 | 含义 |
+|----|------|------|
+| Grok 可执行文件路径 | 空 | 留空自动检测；可填写绝对路径 |
+| 总超时 | 10 分钟 | 单轮请求最长等待时间 |
+| 无进度超时 | 2 分钟 | 连续无输出/思考进度时终止 |
+| 最大回合数 | 30 | 限制 agent 循环长度 |
+| 禁用工具 | `run_terminal_cmd` | 默认禁用 shell 工具 |
+| 额外规则 | 内置安全写作规则 | 传给 `grok --rules` |
+
+**上下文上限**
+
+默认限制：
+
+- 消息内文件：8
+- 消息内文件夹：4
+- 消息内标签：6
+- 展开路径总数：32
+- 每文件夹文件数：20
+- 每标签文件数：20
+- 单文件字符上限：约 50KB
+- 总字符上限：约 180KB
+
+达到上限时，本轮上下文明细会显示截断原因。
 
 ## 开发
 
 ```bash
-npm run build   # TypeScript 检查 + 生产打包
-npm test        # 纯函数单测（diff / context / ACP args）
-npm run dev     # esbuild watch
+npm install
+npm run build
+npm test
+npm run dev
 ```
+
+构建产物为根目录 `main.js`。
+
+Windows 开发联接示例：
+
+```powershell
+New-Item -ItemType Junction `
+  -Path "D:\MyVault\.obsidian\plugins\obsidian-grok-build" `
+  -Target "D:\Obsidian知识库\.obsidian\plugins\obsidian-grok-build"
+```
+
+## 限制
+
+- 只支持桌面端 Obsidian。
+- 依赖本机 Grok CLI、登录态和网络。
+- 图片会话使用 ACP；图片回合与文本 headless session 可能不是完全相同的 session 空间，因此插件会在必要时注入近期对话文本。
+- SEARCH/REPLACE 必须唯一匹配，匹配不到或匹配多处都会拒绝应用。
+- 插件聊天默认使用 `plan` 权限；真正写文件只发生在用户点击插入/追加/新建或确认 Diff 应用后。
 
 ## License
 

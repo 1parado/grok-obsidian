@@ -59,7 +59,7 @@ __export(main_exports, {
   default: () => GrokBuildPlugin
 });
 module.exports = __toCommonJS(main_exports);
-var import_obsidian6 = require("obsidian");
+var import_obsidian8 = require("obsidian");
 
 // src/attachments.ts
 var import_obsidian = require("obsidian");
@@ -182,6 +182,37 @@ function createInitialChatState(includeActiveNote = true) {
   };
 }
 
+// src/historyFilter.ts
+function filterConversationsByQuery(conversations, query) {
+  const q = query.trim().toLocaleLowerCase();
+  if (!q)
+    return conversations;
+  return conversations.filter((item) => conversationMatchesQuery(item, q));
+}
+function conversationMatchesQuery(conversation, normalizedQuery) {
+  const q = normalizedQuery.trim().toLocaleLowerCase();
+  if (!q)
+    return true;
+  const title = (conversation.title || "\u672A\u547D\u540D\u5BF9\u8BDD").toLocaleLowerCase();
+  if (title.includes(q))
+    return true;
+  for (const message of conversation.messages ?? []) {
+    if ((message.text ?? "").toLocaleLowerCase().includes(q))
+      return true;
+    if ((message.thoughtText ?? "").toLocaleLowerCase().includes(q))
+      return true;
+  }
+  return false;
+}
+function sortConversationsForHistory(conversations) {
+  return [...conversations].sort((a, b) => {
+    const pin = Number(Boolean(b.pinned)) - Number(Boolean(a.pinned));
+    if (pin !== 0)
+      return pin;
+    return (b.updatedAt ?? 0) - (a.updatedAt ?? 0);
+  });
+}
+
 // src/chatStore.ts
 var ChatStore = class {
   constructor(stored, historyLimit, includeActiveNote) {
@@ -201,7 +232,7 @@ var ChatStore = class {
     return conversation;
   }
   list() {
-    return [...this.state.conversations].sort((a, b) => b.updatedAt - a.updatedAt);
+    return sortConversationsForHistory(this.state.conversations);
   }
   select(id) {
     const conversation = this.state.conversations.find((item) => item.id === id) ?? null;
@@ -296,6 +327,15 @@ var ChatStore = class {
     conversation.updatedAt = Date.now();
     return true;
   }
+  setPinned(id, pinned) {
+    const conversation = this.state.conversations.find((item) => item.id === id);
+    if (!conversation)
+      return false;
+    conversation.pinned = pinned;
+    conversation.updatedAt = Date.now();
+    this.trim();
+    return true;
+  }
   exportMarkdown(id) {
     const conversation = this.state.conversations.find((item) => item.id === id);
     if (!conversation)
@@ -344,6 +384,7 @@ var ChatStore = class {
     }
     const conversations = stored.conversations.filter((item) => item && typeof item.id === "string" && Array.isArray(item.messages)).map((item) => ({
       ...item,
+      pinned: Boolean(item.pinned),
       includeActiveNote: typeof item.includeActiveNote === "boolean" ? item.includeActiveNote : includeActiveNote,
       messages: item.messages.filter(
         (message, index, messages) => messages.findIndex((candidate) => candidate.id === message.id) === index
@@ -362,10 +403,16 @@ var ChatStore = class {
     };
   }
   trim() {
-    const sorted = this.list().slice(0, Math.max(1, this.historyLimit));
-    this.state.conversations = sorted;
-    if (!sorted.some((item) => item.id === this.state.currentConversationId)) {
-      this.state.currentConversationId = sorted[0].id;
+    const limit = Math.max(1, this.historyLimit);
+    const sorted = this.list();
+    const pinned = sorted.filter((c) => c.pinned);
+    const unpinned = sorted.filter((c) => !c.pinned);
+    const room = Math.max(limit, pinned.length);
+    const keptUnpinned = unpinned.slice(0, Math.max(0, room - pinned.length));
+    const kept = [...pinned, ...keptUnpinned];
+    this.state.conversations = sortConversationsForHistory(kept);
+    if (!this.state.conversations.some((item) => item.id === this.state.currentConversationId)) {
+      this.state.currentConversationId = this.state.conversations[0].id;
     }
   }
 };
@@ -426,7 +473,7 @@ function tagMatches(candidate, selected) {
 }
 
 // src/diffModal.ts
-var import_obsidian2 = require("obsidian");
+var import_obsidian3 = require("obsidian");
 
 // src/diffUtils.ts
 function extractCandidate(text) {
@@ -594,13 +641,13 @@ function applyReplacements(content, replacements) {
     if (occurrences === 0) {
       return {
         ok: false,
-        error: `\u7B2C ${index + 1} \u5904 SEARCH \u672A\u5728\u6587\u4EF6\u4E2D\u627E\u5230\u552F\u4E00\u5339\u914D`
+        error: `\u7B2C ${index + 1} \u5904 SEARCH \u672A\u5339\u914D\uFF1A\u76EE\u6807\u6587\u4EF6\u4E2D\u627E\u4E0D\u5230\u8FD9\u6BB5\u539F\u6587`
       };
     }
     if (occurrences > 1) {
       return {
         ok: false,
-        error: `\u7B2C ${index + 1} \u5904 SEARCH \u5339\u914D\u4E86 ${occurrences} \u6B21\uFF0C\u5DF2\u62D2\u7EDD\uFF08\u9700\u552F\u4E00\uFF09`
+        error: `\u7B2C ${index + 1} \u5904 SEARCH \u5339\u914D\u591A\u5904\uFF1A\u5171 ${occurrences} \u6B21\uFF0C\u9700\u8BA9\u6A21\u578B\u63D0\u4F9B\u552F\u4E00\u7247\u6BB5`
       };
     }
     next = next.replace(item.search, item.replace);
@@ -680,16 +727,169 @@ function kindLabel(kind, exists) {
   return "\u5168\u6587\u66FF\u6362";
 }
 
+// src/applyUndo.ts
+var DEFAULT_UNDO_TTL_MS = 3e4;
+function createApplyUndoEntry(snapshots, now = Date.now(), ttlMs = DEFAULT_UNDO_TTL_MS) {
+  return {
+    id: `undo-${now.toString(36)}-${Math.random().toString(36).slice(2, 7)}`,
+    createdAt: now,
+    snapshots: snapshots.map((s) => ({ path: s.path, before: s.before })),
+    expiresAt: now + Math.max(0, ttlMs)
+  };
+}
+function isUndoEntryValid(entry, now = Date.now()) {
+  if (!entry || !entry.snapshots?.length)
+    return false;
+  return now <= entry.expiresAt;
+}
+function planUndoActions(entry) {
+  return entry.snapshots.map(
+    (snap) => snap.before === null ? { path: snap.path, action: "delete" } : { path: snap.path, action: "restore", content: snap.before }
+  );
+}
+
+// src/confirmModal.ts
+var import_obsidian2 = require("obsidian");
+var ConfirmModal = class extends import_obsidian2.Modal {
+  constructor(app, titleText, bodyText, confirmLabel = "\u786E\u5B9A", cancelLabel = "\u53D6\u6D88", danger = false) {
+    super(app);
+    this.titleText = titleText;
+    this.bodyText = bodyText;
+    this.confirmLabel = confirmLabel;
+    this.cancelLabel = cancelLabel;
+    this.danger = danger;
+    this.result = null;
+    this.resolveFn = null;
+  }
+  onOpen() {
+    const { contentEl } = this;
+    contentEl.addClass("grok-confirm-modal");
+    contentEl.createEl("h2", { text: this.titleText });
+    contentEl.createDiv({ cls: "grok-confirm-body", text: this.bodyText });
+    new import_obsidian2.Setting(contentEl).addButton(
+      (btn) => btn.setButtonText(this.cancelLabel).onClick(() => {
+        this.result = false;
+        this.close();
+      })
+    ).addButton((btn) => {
+      btn.setButtonText(this.confirmLabel).setCta();
+      if (this.danger)
+        btn.setWarning();
+      btn.onClick(() => {
+        this.result = true;
+        this.close();
+      });
+    });
+  }
+  onClose() {
+    this.contentEl.empty();
+    this.resolveFn?.(this.result === true);
+    this.resolveFn = null;
+  }
+  wait() {
+    return new Promise((resolve) => {
+      this.resolveFn = resolve;
+      this.open();
+    });
+  }
+};
+var PromptModal = class extends import_obsidian2.Modal {
+  constructor(app, titleText, initial, placeholder = "") {
+    super(app);
+    this.titleText = titleText;
+    this.initial = initial;
+    this.placeholder = placeholder;
+    this.resolved = false;
+    this.resolveFn = null;
+    this.value = initial;
+  }
+  onOpen() {
+    const { contentEl } = this;
+    contentEl.addClass("grok-prompt-modal");
+    contentEl.createEl("h2", { text: this.titleText });
+    const input = contentEl.createEl("input", {
+      cls: "grok-prompt-input",
+      attr: { type: "text", placeholder: this.placeholder }
+    });
+    input.value = this.initial;
+    input.addEventListener("input", () => {
+      this.value = input.value;
+    });
+    input.addEventListener("keydown", (event) => {
+      if (event.key === "Enter") {
+        event.preventDefault();
+        this.resolved = true;
+        this.close();
+      } else if (event.key === "Escape") {
+        event.preventDefault();
+        this.value = "";
+        this.resolved = false;
+        this.close();
+      }
+    });
+    new import_obsidian2.Setting(contentEl).addButton(
+      (btn) => btn.setButtonText("\u53D6\u6D88").onClick(() => {
+        this.resolved = false;
+        this.close();
+      })
+    ).addButton(
+      (btn) => btn.setButtonText("\u786E\u5B9A").setCta().onClick(() => {
+        this.resolved = true;
+        this.close();
+      })
+    );
+    window.setTimeout(() => {
+      input.focus();
+      input.select();
+    }, 20);
+  }
+  onClose() {
+    this.contentEl.empty();
+    this.resolveFn?.(this.resolved ? this.value : null);
+    this.resolveFn = null;
+  }
+  wait() {
+    return new Promise((resolve) => {
+      this.resolveFn = resolve;
+      this.open();
+    });
+  }
+};
+
 // src/diffModal.ts
-var ApplyDiffModal = class extends import_obsidian2.Modal {
-  constructor(app, responseText, fallbackPath, onApplied) {
+function statusLabel(item) {
+  if (item.applied)
+    return "\u5DF2\u5E94\u7528";
+  if (item.error)
+    return item.error === "\u6CA1\u6709\u5B9E\u9645\u53D8\u5316" ? "\u65E0\u53D8\u5316" : "\u5931\u8D25";
+  if (item.change.kind === "partial")
+    return "\u5C40\u90E8";
+  if (item.change.kind === "create" || !item.exists)
+    return "\u65B0\u589E";
+  return "\u4FEE\u6539";
+}
+function statusClass(item) {
+  if (item.applied)
+    return "is-applied";
+  if (item.error)
+    return item.error === "\u6CA1\u6709\u5B9E\u9645\u53D8\u5316" ? "is-unchanged" : "is-error";
+  if (item.change.kind === "partial")
+    return "is-partial";
+  if (item.change.kind === "create" || !item.exists)
+    return "is-create";
+  return "is-full";
+}
+var ApplyDiffModal = class extends import_obsidian3.Modal {
+  constructor(app, responseText, fallbackPath, onApplied, onWriteBack) {
     super(app);
     this.responseText = responseText;
     this.fallbackPath = fallbackPath;
     this.onApplied = onApplied;
+    this.onWriteBack = onWriteBack;
     this.resolved = [];
     this.activePath = null;
     this.appliedCount = 0;
+    this.snapshots = [];
   }
   async onOpen() {
     const { contentEl, modalEl } = this;
@@ -706,9 +906,20 @@ var ApplyDiffModal = class extends import_obsidian2.Modal {
     if (proposed.length === 0) {
       contentEl.createDiv({
         cls: "grok-diff-empty",
-        text: "\u56DE\u7B54\u4E2D\u6CA1\u6709\u53EF\u89E3\u6790\u7684\u6587\u4EF6\u66F4\u6539\u3002\u53EF\u8BA9\u6A21\u578B\u6309\u300C\u8DEF\u5F84 + \u4EE3\u7801\u5757\u300D\u8F93\u51FA\u5168\u6587\uFF0C\u6216\u5BF9\u5DF2\u6709\u6587\u4EF6\u4F7F\u7528 SEARCH/REPLACE \u5C40\u90E8\u5757\u3002"
+        text: "\u56DE\u7B54\u4E2D\u6CA1\u6709\u53EF\u89E3\u6790\u7684\u6587\u4EF6\u66F4\u6539\u3002\u53EF\u8BA9\u6A21\u578B\u6309\u300C\u8DEF\u5F84 + \u4EE3\u7801\u5757\u300D\u8F93\u51FA\u5168\u6587\uFF0C\u6216\u5BF9\u5DF2\u6709\u6587\u4EF6\u4F7F\u7528 SEARCH/REPLACE \u5C40\u90E8\u5757\u3002\u4E5F\u53EF\u4EE5\u628A\u672C\u56DE\u7B54\u76F4\u63A5\u5199\u5165\u7B14\u8BB0\uFF1A"
       });
-      new import_obsidian2.Setting(contentEl).addButton(
+      const actions = contentEl.createDiv({ cls: "grok-diff-fallback-actions" });
+      const makeBtn = (label, action) => {
+        const btn = actions.createEl("button", { cls: action === "create" ? "mod-cta" : "", text: label });
+        btn.addEventListener("click", async () => {
+          await this.onWriteBack?.(action, this.responseText);
+          this.close();
+        });
+      };
+      makeBtn("\u63D2\u5165\u5230\u5149\u6807", "insert");
+      makeBtn("\u8FFD\u52A0\u5230\u5F53\u524D\u7B14\u8BB0", "append");
+      makeBtn("\u65B0\u5EFA\u7B14\u8BB0", "create");
+      new import_obsidian3.Setting(contentEl).addButton(
         (button) => button.setButtonText("\u5173\u95ED").onClick(() => this.close())
       );
       return;
@@ -728,7 +939,7 @@ var ApplyDiffModal = class extends import_obsidian2.Modal {
   }
   async resolveChange(change) {
     const abstract = this.app.vault.getAbstractFileByPath(change.path);
-    const exists = abstract instanceof import_obsidian2.TFile;
+    const exists = abstract instanceof import_obsidian3.TFile;
     const before = exists ? await this.app.vault.read(abstract) : "";
     const materialized = materializeChange(before, change, exists);
     if (!materialized.ok) {
@@ -785,9 +996,14 @@ var ApplyDiffModal = class extends import_obsidian2.Modal {
         cls: "grok-diff-file-path",
         text: item.change.path
       });
+      const badge = main.createSpan({
+        cls: `grok-diff-status-badge ${statusClass(item)}`,
+        text: statusLabel(item)
+      });
+      badge.setAttr("title", kindLabel(item.change.kind, item.exists));
       const meta3 = [
-        item.applied ? "\u5DF2\u5E94\u7528" : kindLabel(item.change.kind, item.exists),
-        item.error ? item.error : `+${item.stats.added} / -${item.stats.removed}`
+        kindLabel(item.change.kind, item.exists),
+        item.error ? item.error : `+${item.stats.added} / -${item.stats.removed} \xB7 ${item.before.length} \u2192 ${item.after.length} \u5B57\u7B26`
       ].join(" \xB7 ");
       main.createDiv({ cls: "grok-diff-file-meta", text: meta3 });
       row.addEventListener("click", () => {
@@ -835,6 +1051,24 @@ var ApplyDiffModal = class extends import_obsidian2.Modal {
           }
         }
       }
+      if (this.onWriteBack) {
+        const fallback = this.detailEl.createDiv({ cls: "grok-diff-fallback-actions" });
+        fallback.createDiv({
+          cls: "grok-diff-stats",
+          text: "\u5C40\u90E8\u4FEE\u6539\u65E0\u6CD5\u5E94\u7528\u65F6\uFF0C\u53EF\u5C06\u6574\u6BB5\u56DE\u7B54\u5199\u5165\u7B14\u8BB0\uFF1A"
+        });
+        for (const [label, action] of [
+          ["\u63D2\u5165\u5230\u5149\u6807", "insert"],
+          ["\u8FFD\u52A0\u5230\u5F53\u524D\u7B14\u8BB0", "append"],
+          ["\u65B0\u5EFA\u7B14\u8BB0", "create"]
+        ]) {
+          const btn = fallback.createEl("button", { text: label });
+          btn.addEventListener("click", async () => {
+            await this.onWriteBack?.(action, this.responseText);
+            this.close();
+          });
+        }
+      }
       return;
     }
     if (!item.applied) {
@@ -842,6 +1076,14 @@ var ApplyDiffModal = class extends import_obsidian2.Modal {
         cls: "grok-diff-stats",
         text: `+${item.stats.added} / -${item.stats.removed} \u884C\u3002\u53EF\u5355\u72EC\u5E94\u7528\u6B64\u6587\u4EF6\uFF0C\u6216\u52FE\u9009\u540E\u4E00\u952E\u5E94\u7528\u5168\u90E8\u3002`
       });
+      if (item.change.kind !== "partial") {
+        const changed = item.stats.added + item.stats.removed;
+        const large = Math.max(item.before.length, item.after.length) >= 2e4 || changed >= 80;
+        this.detailEl.createDiv({
+          cls: `grok-diff-warn${large ? " is-large" : ""}`,
+          text: item.change.kind === "create" ? `\u5C06\u65B0\u5EFA\u6587\u4EF6\u5E76\u5199\u5165\u5168\u6587\uFF08${item.after.length} \u5B57\u7B26\uFF09\u3002` : `\u5168\u6587\u66FF\u6362\uFF1A\u4F1A\u8986\u76D6\u76EE\u6807\u6587\u4EF6\u73B0\u6709\u5185\u5BB9\uFF08${item.before.length} \u2192 ${item.after.length} \u5B57\u7B26\uFF09\u3002${large ? " \u8FD9\u662F\u8F83\u5927\u7684\u5168\u6587\u5199\u5165\uFF0C\u8BF7\u4ED4\u7EC6\u6838\u5BF9\u3002" : ""}`
+        });
+      }
     }
     const diff = this.detailEl.createEl("pre", { cls: "grok-diff-preview" });
     for (const line of buildSimpleDiff(item.before, item.after).split("\n")) {
@@ -865,7 +1107,7 @@ var ApplyDiffModal = class extends import_obsidian2.Modal {
     this.footerEl.empty();
     const pending = this.resolved.filter((item) => !item.error && !item.applied);
     const selected = pending.filter((item) => item.selected);
-    const bar = new import_obsidian2.Setting(this.footerEl);
+    const bar = new import_obsidian3.Setting(this.footerEl);
     bar.setDesc(
       pending.length ? `\u5F85\u5904\u7406 ${pending.length} \xB7 \u5DF2\u52FE\u9009 ${selected.length} \xB7 \u5DF2\u5E94\u7528 ${this.appliedCount}` : `\u5168\u90E8\u5904\u7406\u5B8C\u6BD5 \xB7 \u5DF2\u5E94\u7528 ${this.appliedCount}`
     );
@@ -908,28 +1150,36 @@ var ApplyDiffModal = class extends import_obsidian2.Modal {
       }
     }
   }
+  needsFullReplaceConfirm(item) {
+    if (item.change.kind === "partial")
+      return false;
+    const changed = item.stats.added + item.stats.removed;
+    return item.change.kind === "create" || item.change.kind === "full" || changed >= 20;
+  }
   async applyOne(item) {
     if (item.error || item.applied)
       return item.error ?? null;
     try {
       const abstract = this.app.vault.getAbstractFileByPath(item.change.path);
+      const beforeSnapshot = abstract instanceof import_obsidian3.TFile ? await this.app.vault.read(abstract) : null;
       if (item.change.kind === "partial") {
-        if (!(abstract instanceof import_obsidian2.TFile))
+        if (!(abstract instanceof import_obsidian3.TFile))
           return "\u6587\u4EF6\u4E0D\u5B58\u5728";
-        const latest = await this.app.vault.read(abstract);
+        const latest = beforeSnapshot ?? "";
         const result = materializeChange(latest, item.change, true);
         if (!result.ok)
           return result.error;
         await this.app.vault.modify(abstract, result.after);
       } else {
         const body = item.after;
-        if (abstract instanceof import_obsidian2.TFile) {
+        if (abstract instanceof import_obsidian3.TFile) {
           await this.app.vault.modify(abstract, body);
         } else {
           await this.ensureFolder(item.change.path);
           await this.app.vault.create(item.change.path, body);
         }
       }
+      this.snapshots.push({ path: item.change.path, before: beforeSnapshot });
       item.applied = true;
       item.selected = false;
       this.appliedCount += 1;
@@ -939,10 +1189,25 @@ var ApplyDiffModal = class extends import_obsidian2.Modal {
     }
   }
   async applyItems(items, advance) {
-    const targets = items.filter((item) => !item.error && !item.applied);
+    let targets = items.filter((item) => !item.error && !item.applied);
     if (targets.length === 0) {
-      new import_obsidian2.Notice("\u6CA1\u6709\u53EF\u5E94\u7528\u7684\u66F4\u6539");
+      new import_obsidian3.Notice("\u6CA1\u6709\u53EF\u5E94\u7528\u7684\u66F4\u6539");
       return;
+    }
+    const needsConfirm = targets.filter((item) => this.needsFullReplaceConfirm(item));
+    if (needsConfirm.length > 0) {
+      const names = needsConfirm.map((i) => i.change.path).slice(0, 5).join("\n");
+      const ok = await new ConfirmModal(
+        this.app,
+        "\u786E\u8BA4\u5168\u6587\u66FF\u6362 / \u65B0\u5EFA",
+        `\u4EE5\u4E0B ${needsConfirm.length} \u4E2A\u6587\u4EF6\u5C06\u5168\u6587\u5199\u5165\uFF08\u8986\u76D6\u6216\u65B0\u5EFA\uFF09\uFF0C\u8BF7\u786E\u8BA4\uFF1A
+${names}${needsConfirm.length > 5 ? "\n\u2026" : ""}`,
+        "\u786E\u8BA4\u5E94\u7528",
+        "\u53D6\u6D88",
+        true
+      ).wait();
+      if (!ok)
+        return;
     }
     const applied = [];
     const failed = [];
@@ -955,18 +1220,20 @@ var ApplyDiffModal = class extends import_obsidian2.Modal {
     }
     if (applied.length) {
       const firstFile = this.app.vault.getAbstractFileByPath(applied[0]);
-      if (firstFile instanceof import_obsidian2.TFile) {
+      if (firstFile instanceof import_obsidian3.TFile) {
         try {
           await this.app.workspace.getLeaf(false).openFile(firstFile);
         } catch {
         }
       }
+      const undo = this.snapshots.length > 0 ? createApplyUndoEntry([...this.snapshots]) : null;
       this.onApplied(
-        failed.length ? `\u5DF2\u5E94\u7528 ${applied.length} \u4E2A\u6587\u4EF6\uFF1B\u5931\u8D25 ${failed.length} \u4E2A` : `\u5DF2\u5E94\u7528 ${applied.length} \u4E2A\u6587\u4EF6`
+        failed.length ? `\u5DF2\u5E94\u7528 ${applied.length} \u4E2A\u6587\u4EF6\uFF1B\u5931\u8D25 ${failed.length} \u4E2A` : `\u5DF2\u5E94\u7528 ${applied.length} \u4E2A\u6587\u4EF6`,
+        undo
       );
     }
     if (failed.length) {
-      new import_obsidian2.Notice(`\u90E8\u5206\u5931\u8D25\uFF1A${failed.slice(0, 3).join("\uFF1B")}${failed.length > 3 ? "\u2026" : ""}`);
+      new import_obsidian3.Notice(`\u90E8\u5206\u5931\u8D25\uFF1A${failed.slice(0, 3).join("\uFF1B")}${failed.length > 3 ? "\u2026" : ""}`);
     }
     const remaining = this.resolved.some((item) => !item.error && !item.applied);
     if (!remaining) {
@@ -19206,6 +19473,65 @@ async function detectDefaultGrokModel(settings) {
     });
   });
 }
+async function testGrokCli(settings, timeoutMs = 8e3) {
+  const resolution = resolveGrokBinary(settings);
+  if (!resolution.found) {
+    return {
+      ok: false,
+      message: `\u672A\u68C0\u6D4B\u5230 grok\uFF1A${resolution.path}\u3002\u8BF7\u5148\u5B89\u88C5 Grok CLI\uFF0C\u6267\u884C grok login\uFF0C\u6216\u5728\u8BBE\u7F6E\u4E2D\u586B\u5199\u7EDD\u5BF9\u8DEF\u5F84\u3002`
+    };
+  }
+  return new Promise((resolve) => {
+    let output = "";
+    let settled = false;
+    const finish = (ok, message) => {
+      if (settled)
+        return;
+      settled = true;
+      resolve(ok ? { ok: true, message } : { ok: false, message });
+    };
+    let child;
+    try {
+      child = (0, import_child_process2.spawn)(resolution.path, ["-p", "hi", "--output-format", "plain"], {
+        env: { ...process.env },
+        windowsHide: true,
+        shell: false
+      });
+    } catch (error51) {
+      finish(false, `\u65E0\u6CD5\u542F\u52A8 grok\uFF1A${error51 instanceof Error ? error51.message : String(error51)}`);
+      return;
+    }
+    const timer = setTimeout(() => {
+      terminateProcessTree(child);
+      finish(false, "grok \u6D4B\u8BD5\u8D85\u65F6\u3002\u82E5\u9996\u6B21\u4F7F\u7528\uFF0C\u8BF7\u786E\u8BA4\u5DF2\u5728\u7EC8\u7AEF\u6267\u884C grok login\u3002");
+    }, timeoutMs);
+    child.stdout.setEncoding("utf8");
+    child.stderr.setEncoding("utf8");
+    child.stdout.on("data", (chunk) => {
+      output += chunk;
+    });
+    child.stderr.on("data", (chunk) => {
+      output += chunk;
+    });
+    child.once("error", (error51) => {
+      clearTimeout(timer);
+      finish(false, `grok \u6D4B\u8BD5\u5931\u8D25\uFF1A${error51.message}`);
+    });
+    child.once("close", (code) => {
+      clearTimeout(timer);
+      const trimmed = output.trim();
+      if (code === 0) {
+        finish(true, `grok CLI \u53EF\u7528\uFF1A${resolution.path}`);
+      } else {
+        finish(
+          false,
+          `grok \u6D4B\u8BD5\u9000\u51FA\u7801 ${code ?? "\u672A\u77E5"}\u3002\u8BF7\u786E\u8BA4\u5DF2\u6267\u884C grok login\u3002${trimmed ? `
+${trimmed.slice(0, 500)}` : ""}`
+        );
+      }
+    });
+  });
+}
 function buildArgs(promptFile, settings, resumeSessionId) {
   const args = [
     "--prompt-file",
@@ -19787,16 +20113,19 @@ function shouldInjectLocalHistory(input) {
 }
 
 // src/historyModal.ts
-var import_obsidian3 = require("obsidian");
-var ChatHistoryModal = class extends import_obsidian3.Modal {
-  constructor(app, conversations, onSelectConversation, onDeleteConversation, onRenameConversation, onExportConversation) {
+var import_obsidian4 = require("obsidian");
+var ChatHistoryModal = class extends import_obsidian4.Modal {
+  constructor(app, conversations, onSelectConversation, onDeleteConversation, onRenameConversation, onExportConversation, onPinConversation, options) {
     super(app);
     this.conversations = conversations;
     this.onSelectConversation = onSelectConversation;
     this.onDeleteConversation = onDeleteConversation;
     this.onRenameConversation = onRenameConversation;
     this.onExportConversation = onExportConversation;
+    this.onPinConversation = onPinConversation;
     this.query = "";
+    this.runningConversationId = null;
+    this.runningConversationId = options?.runningConversationId ?? null;
   }
   onOpen() {
     const { contentEl } = this;
@@ -19804,18 +20133,24 @@ var ChatHistoryModal = class extends import_obsidian3.Modal {
     contentEl.createEl("h2", { text: "\u5BF9\u8BDD\u5386\u53F2" });
     contentEl.createDiv({
       cls: "grok-history-hint",
-      text: "\u641C\u7D22\u6807\u9898 \xB7 \u70B9\u51FB\u6253\u5F00 \xB7 \u53EF\u91CD\u547D\u540D / \u5BFC\u51FA Markdown / \u5220\u9664"
+      text: "\u641C\u7D22\u6807\u9898\u4E0E\u6B63\u6587 \xB7 \u70B9\u51FB\u6253\u5F00 \xB7 \u53EF\u7F6E\u9876 / \u91CD\u547D\u540D / \u5BFC\u51FA / \u5220\u9664"
     });
+    if (this.runningConversationId) {
+      contentEl.createDiv({
+        cls: "grok-history-running-hint",
+        text: "\u6709\u4EFB\u52A1\u5728\u8FD0\u884C\uFF1A\u5207\u6362\u5386\u53F2\u4E0D\u4F1A\u4E2D\u65AD\u5F53\u524D\u751F\u6210\uFF1B\u5B8C\u6210\u540E\u4F1A\u4FDD\u7559\u5728\u539F\u5BF9\u8BDD\u4E2D\u3002"
+      });
+    }
     this.searchEl = contentEl.createEl("input", {
       cls: "grok-history-search",
       attr: {
         type: "search",
-        placeholder: "\u6309\u6807\u9898\u641C\u7D22\u2026",
-        "aria-label": "\u6309\u6807\u9898\u641C\u7D22\u5BF9\u8BDD"
+        placeholder: "\u6309\u6807\u9898\u6216\u6D88\u606F\u6B63\u6587\u641C\u7D22\u2026",
+        "aria-label": "\u6309\u6807\u9898\u6216\u6D88\u606F\u6B63\u6587\u641C\u7D22\u5BF9\u8BDD"
       }
     });
     this.searchEl.addEventListener("input", () => {
-      this.query = this.searchEl.value.trim().toLocaleLowerCase();
+      this.query = this.searchEl.value.trim();
       this.renderList();
     });
     this.listEl = contentEl.createDiv({ cls: "grok-history-list" });
@@ -19823,10 +20158,8 @@ var ChatHistoryModal = class extends import_obsidian3.Modal {
     this.searchEl.focus();
   }
   filtered() {
-    if (!this.query)
-      return this.conversations;
-    return this.conversations.filter(
-      (item) => (item.title || "\u672A\u547D\u540D\u5BF9\u8BDD").toLocaleLowerCase().includes(this.query)
+    return sortConversationsForHistory(
+      filterConversationsByQuery(this.conversations, this.query)
     );
   }
   renderList() {
@@ -19840,12 +20173,25 @@ var ChatHistoryModal = class extends import_obsidian3.Modal {
       return;
     }
     for (const item of items) {
-      const row = this.listEl.createDiv({ cls: "grok-history-row" });
+      const row = this.listEl.createDiv({
+        cls: [
+          "grok-history-row",
+          item.pinned ? "is-pinned" : "",
+          item.id === this.runningConversationId ? "is-running" : ""
+        ].filter(Boolean).join(" ")
+      });
       const main = row.createEl("button", {
         cls: "grok-history-main",
         attr: { type: "button", title: "\u6253\u5F00\u6B64\u5BF9\u8BDD" }
       });
-      main.createDiv({ cls: "grok-history-title", text: item.title || "\u672A\u547D\u540D\u5BF9\u8BDD" });
+      const titleRow = main.createDiv({ cls: "grok-history-title-row" });
+      if (item.pinned) {
+        titleRow.createSpan({ cls: "grok-history-pin-badge", text: "\u7F6E\u9876" });
+      }
+      if (item.id === this.runningConversationId) {
+        titleRow.createSpan({ cls: "grok-history-running-badge", text: "\u751F\u6210\u4E2D" });
+      }
+      titleRow.createDiv({ cls: "grok-history-title", text: item.title || "\u672A\u547D\u540D\u5BF9\u8BDD" });
       const date5 = new Date(item.updatedAt).toLocaleString();
       main.createDiv({
         cls: "grok-history-meta",
@@ -19856,31 +20202,57 @@ var ChatHistoryModal = class extends import_obsidian3.Modal {
         this.close();
       });
       const actions = row.createDiv({ cls: "grok-history-actions" });
+      if (this.onPinConversation) {
+        const pin = actions.createEl("button", {
+          cls: "grok-history-action clickable-icon",
+          attr: {
+            type: "button",
+            "aria-label": item.pinned ? "\u53D6\u6D88\u7F6E\u9876" : "\u7F6E\u9876",
+            title: item.pinned ? "\u53D6\u6D88\u7F6E\u9876" : "\u7F6E\u9876"
+          }
+        });
+        (0, import_obsidian4.setIcon)(pin, item.pinned ? "pin-off" : "pin");
+        pin.addEventListener("click", async (event) => {
+          event.preventDefault();
+          event.stopPropagation();
+          const ok = await this.onPinConversation?.(item, !item.pinned);
+          if (ok) {
+            item.pinned = !item.pinned;
+            this.renderList();
+            new import_obsidian4.Notice(item.pinned ? "\u5DF2\u7F6E\u9876" : "\u5DF2\u53D6\u6D88\u7F6E\u9876");
+          }
+        });
+      }
       const rename = actions.createEl("button", {
         cls: "grok-history-action clickable-icon",
         attr: { type: "button", "aria-label": "\u91CD\u547D\u540D", title: "\u91CD\u547D\u540D" }
       });
-      (0, import_obsidian3.setIcon)(rename, "pencil");
+      (0, import_obsidian4.setIcon)(rename, "pencil");
       rename.addEventListener("click", async (event) => {
         event.preventDefault();
         event.stopPropagation();
-        const next = window.prompt("\u91CD\u547D\u540D\u5BF9\u8BDD", item.title || "\u672A\u547D\u540D\u5BF9\u8BDD");
+        const next = await new PromptModal(
+          this.app,
+          "\u91CD\u547D\u540D\u5BF9\u8BDD",
+          item.title || "\u672A\u547D\u540D\u5BF9\u8BDD",
+          "\u5BF9\u8BDD\u6807\u9898"
+        ).wait();
         if (next == null)
           return;
         const ok = await this.onRenameConversation(item, next);
         if (ok) {
           item.title = next.trim().slice(0, 80) || item.title;
           this.renderList();
-          new import_obsidian3.Notice("\u5DF2\u91CD\u547D\u540D");
+          new import_obsidian4.Notice("\u5DF2\u91CD\u547D\u540D");
         } else {
-          new import_obsidian3.Notice("\u91CD\u547D\u540D\u5931\u8D25");
+          new import_obsidian4.Notice("\u91CD\u547D\u540D\u5931\u8D25");
         }
       });
       const exp = actions.createEl("button", {
         cls: "grok-history-action clickable-icon",
         attr: { type: "button", "aria-label": "\u5BFC\u51FA Markdown", title: "\u5BFC\u51FA Markdown" }
       });
-      (0, import_obsidian3.setIcon)(exp, "download");
+      (0, import_obsidian4.setIcon)(exp, "download");
       exp.addEventListener("click", async (event) => {
         event.preventDefault();
         event.stopPropagation();
@@ -19890,15 +20262,20 @@ var ChatHistoryModal = class extends import_obsidian3.Modal {
         cls: "grok-history-action grok-history-delete clickable-icon",
         attr: { type: "button", "aria-label": "\u5220\u9664\u5BF9\u8BDD", title: "\u5220\u9664\u5BF9\u8BDD" }
       });
-      (0, import_obsidian3.setIcon)(del, "trash-2");
+      (0, import_obsidian4.setIcon)(del, "trash-2");
       del.addEventListener("click", async (event) => {
         event.preventDefault();
         event.stopPropagation();
         const title = item.title || "\u672A\u547D\u540D\u5BF9\u8BDD";
-        const confirmed = window.confirm(
+        const confirmed = await new ConfirmModal(
+          this.app,
+          "\u5220\u9664\u5BF9\u8BDD",
           `\u786E\u5B9A\u5220\u9664\u5BF9\u8BDD\u300C${title}\u300D\uFF1F
-\u6B64\u64CD\u4F5C\u4F1A\u79FB\u9664\u672C\u5730\u8BB0\u5F55\uFF0C\u5E76\u53EF\u80FD\u6E05\u7406\u5173\u8054\u622A\u56FE\u9644\u4EF6\u3002`
-        );
+\u6B64\u64CD\u4F5C\u4F1A\u79FB\u9664\u672C\u5730\u8BB0\u5F55\uFF0C\u5E76\u53EF\u80FD\u6E05\u7406\u5173\u8054\u622A\u56FE\u9644\u4EF6\u3002`,
+          "\u5220\u9664",
+          "\u53D6\u6D88",
+          true
+        ).wait();
         if (!confirmed)
           return;
         await this.onDeleteConversation(item);
@@ -19912,8 +20289,116 @@ var ChatHistoryModal = class extends import_obsidian3.Modal {
   }
 };
 
+// src/contextInventoryModal.ts
+var import_obsidian5 = require("obsidian");
+var ITEM_ICON = {
+  "active-note": "file-text",
+  "open-tab": "layers",
+  file: "file-text",
+  folder: "folder",
+  tag: "hash",
+  selection: "scan-text",
+  image: "image",
+  expanded: "list-tree"
+};
+var ContextInventoryModal = class extends import_obsidian5.Modal {
+  constructor(app, inventory, onOpenSource, onRemoveItem) {
+    super(app);
+    this.inventory = inventory;
+    this.onOpenSource = onOpenSource;
+    this.onRemoveItem = onRemoveItem;
+  }
+  onOpen() {
+    const { contentEl } = this;
+    contentEl.addClass("grok-context-inventory-modal");
+    contentEl.createEl("h2", { text: "\u672C\u8F6E\u4E0A\u4E0B\u6587" });
+    contentEl.createDiv({
+      cls: `grok-context-inventory-summary${this.inventory.truncated ? " is-truncated" : ""}`,
+      text: this.inventory.line
+    });
+    if (this.inventory.truncationReasons.length > 0) {
+      const reasons = contentEl.createDiv({ cls: "grok-context-inventory-reasons" });
+      reasons.createDiv({ cls: "grok-context-inventory-reasons-title", text: "\u622A\u65AD\u539F\u56E0" });
+      for (const reason of this.inventory.truncationReasons) {
+        reasons.createDiv({ cls: "grok-context-inventory-reason", text: reason });
+      }
+    }
+    const list = contentEl.createDiv({ cls: "grok-context-inventory-list" });
+    if (this.inventory.items.length === 0) {
+      list.createDiv({ cls: "grok-context-inventory-empty", text: "\u672C\u8F6E\u65E0\u989D\u5916\u4E0A\u4E0B\u6587" });
+    } else {
+      for (const item of this.inventory.items) {
+        this.renderItem(list, item);
+      }
+    }
+    new import_obsidian5.Setting(contentEl).addButton(
+      (button) => button.setButtonText("\u590D\u5236\u6E05\u5355").onClick(() => void this.copyInventory())
+    ).addButton(
+      (button) => button.setButtonText("\u5173\u95ED").onClick(() => this.close())
+    );
+  }
+  renderItem(parent, item) {
+    const clickable = Boolean(item.path && this.onOpenSource);
+    const row = parent.createDiv({
+      cls: `grok-context-inventory-item${item.truncated ? " is-truncated" : ""}`
+    });
+    const main = row.createEl(clickable ? "button" : "div", {
+      cls: `grok-context-inventory-main${clickable ? " is-clickable" : ""}`,
+      attr: clickable ? { type: "button", title: item.path } : {}
+    });
+    const icon = main.createSpan({ cls: "grok-context-inventory-icon" });
+    (0, import_obsidian5.setIcon)(icon, ITEM_ICON[item.kind]);
+    const text = main.createSpan({ cls: "grok-context-inventory-text" });
+    text.createSpan({ cls: "grok-context-inventory-label", text: item.label });
+    if (item.detail || item.path) {
+      text.createSpan({
+        cls: "grok-context-inventory-detail",
+        text: [item.detail, item.path].filter(Boolean).join(" \xB7 ")
+      });
+    }
+    if (item.truncated) {
+      main.createSpan({ cls: "grok-context-inventory-badge", text: "\u622A\u65AD" });
+    }
+    if (item.removable && this.onRemoveItem) {
+      const remove = row.createEl("button", {
+        cls: "grok-context-inventory-remove clickable-icon",
+        attr: { type: "button", title: "\u79FB\u9664\u6B64\u4E0A\u4E0B\u6587", "aria-label": "\u79FB\u9664\u6B64\u4E0A\u4E0B\u6587" }
+      });
+      (0, import_obsidian5.setIcon)(remove, "x");
+      remove.addEventListener("click", (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        void this.onRemoveItem?.(item);
+        this.close();
+      });
+    }
+    if (clickable) {
+      main.addEventListener("click", () => {
+        void this.onOpenSource?.(item.path);
+        this.close();
+      });
+    }
+  }
+  async copyInventory() {
+    const lines = [
+      `\u672C\u8F6E\u4E0A\u4E0B\u6587\uFF1A${this.inventory.line}`,
+      "",
+      ...this.inventory.items.map((item) => {
+        const detail = [item.detail, item.path].filter(Boolean).join(" \xB7 ");
+        return `- ${item.label}${detail ? `\uFF1A${detail}` : ""}${item.truncated ? "\uFF08\u622A\u65AD\uFF09" : ""}`;
+      }),
+      ...this.inventory.truncationReasons.length ? ["", "\u622A\u65AD\u539F\u56E0\uFF1A", ...this.inventory.truncationReasons.map((reason) => `- ${reason}`)] : []
+    ];
+    await navigator.clipboard.writeText(lines.join("\n"));
+    new import_obsidian5.Notice("\u5DF2\u590D\u5236\u4E0A\u4E0B\u6587\u6E05\u5355");
+  }
+  onClose() {
+    this.contentEl.empty();
+  }
+};
+
 // src/petView.ts
-var import_obsidian4 = require("obsidian");
+var import_obsidian6 = require("obsidian");
 
 // src/suggestionRank.ts
 function matchScore(title, subtitle, query) {
@@ -19961,6 +20446,33 @@ function rankTagSuggestions(tags, query, limit = 80) {
   ).slice(0, limit).map((entry) => entry.item);
 }
 
+// src/streamingMarkdown.ts
+function formatStreamingMarkdownPreview(text, maxChars = 12e4) {
+  if (!text)
+    return "";
+  const clipped = text.length > maxChars ? `${text.slice(0, maxChars)}
+\u2026` : text;
+  return clipped;
+}
+function hasMarkdownStructure(text) {
+  if (!text)
+    return false;
+  return /^#{1,6}\s/m.test(text) || /^```/m.test(text) || /^[-*+]\s/m.test(text) || /^\d+\.\s/m.test(text) || /\*\*[^*]+\*\*/.test(text) || /`[^`]+`/.test(text) || /^\|.+\|/m.test(text) || /^>\s/m.test(text);
+}
+
+// src/scrollPolicy.ts
+var NEAR_BOTTOM_THRESHOLD_PX = 80;
+function isNearBottom(metrics, thresholdPx = NEAR_BOTTOM_THRESHOLD_PX) {
+  const distance = metrics.scrollHeight - (metrics.scrollTop + metrics.clientHeight);
+  return distance <= Math.max(0, thresholdPx);
+}
+function shouldAutoScrollOnUpdate(metrics, thresholdPx = NEAR_BOTTOM_THRESHOLD_PX) {
+  return isNearBottom(metrics, thresholdPx);
+}
+function shouldShowJumpToLatest(metrics, contentGrew, thresholdPx = NEAR_BOTTOM_THRESHOLD_PX) {
+  return contentGrew && !isNearBottom(metrics, thresholdPx);
+}
+
 // src/petView.ts
 var GROK_PET_VIEW_TYPE = "grok-build-pet-view";
 var STAGE_LABEL = {
@@ -19972,7 +20484,7 @@ var STAGE_LABEL = {
   error: "\u51FA\u9519",
   cancelled: "\u5DF2\u505C\u6B62"
 };
-var GrokPetView = class extends import_obsidian4.ItemView {
+var GrokPetView = class extends import_obsidian6.ItemView {
   constructor(leaf, iconSrc) {
     super(leaf);
     this.iconSrc = iconSrc;
@@ -19996,9 +20508,14 @@ var GrokPetView = class extends import_obsidian4.ItemView {
     this.customPrompts = [];
     this.activeNotePath = null;
     this.activeNoteChipText = "\u5F53\u524D\u7B14\u8BB0";
+    this.selectionChars = null;
     this.turnSummaryLine = "\u672C\u8F6E\u65E0\u989D\u5916\u4E0A\u4E0B\u6587";
     this.turnSummaryTruncated = false;
+    this.contextInventory = null;
     this.openTabs = [];
+    this.cliReady = true;
+    this.cliBanner = null;
+    this.pendingUndoAvailable = false;
     /** Cached vault index for @ suggestions (invalidated on vault events). */
     this.atIndex = null;
     this.tagIndex = null;
@@ -20013,11 +20530,17 @@ var GrokPetView = class extends import_obsidian4.ItemView {
     this.onDropContext = null;
     this.onRemoveAttachment = null;
     this.onToggleActiveNote = null;
+    this.onOpenContextInventory = null;
+    this.onRefreshCli = null;
+    this.onOpenSettings = null;
+    this.onTestCli = null;
+    this.onUndoLastApply = null;
     this.onCopyMessage = null;
     this.onEditMessage = null;
     this.onRegenerateMessage = null;
     this.onRetryMessage = null;
     this.onApplyMessage = null;
+    this.onWriteBackMessage = null;
     this.onOpenSource = null;
     this.onDraftContextChange = null;
     this.onToggleOpenTab = null;
@@ -20041,11 +20564,17 @@ var GrokPetView = class extends import_obsidian4.ItemView {
     this.onDropContext = handlers.onDropContext ?? null;
     this.onRemoveAttachment = handlers.onRemoveAttachment ?? null;
     this.onToggleActiveNote = handlers.onToggleActiveNote ?? null;
+    this.onOpenContextInventory = handlers.onOpenContextInventory ?? null;
+    this.onRefreshCli = handlers.onRefreshCli ?? null;
+    this.onOpenSettings = handlers.onOpenSettings ?? null;
+    this.onTestCli = handlers.onTestCli ?? null;
+    this.onUndoLastApply = handlers.onUndoLastApply ?? null;
     this.onCopyMessage = handlers.onCopyMessage ?? null;
     this.onEditMessage = handlers.onEditMessage ?? null;
     this.onRegenerateMessage = handlers.onRegenerateMessage ?? null;
     this.onRetryMessage = handlers.onRetryMessage ?? null;
     this.onApplyMessage = handlers.onApplyMessage ?? null;
+    this.onWriteBackMessage = handlers.onWriteBackMessage ?? null;
     this.onOpenSource = handlers.onOpenSource ?? null;
     this.onDraftContextChange = handlers.onDraftContextChange ?? null;
     this.onToggleOpenTab = handlers.onToggleOpenTab ?? null;
@@ -20062,6 +20591,34 @@ var GrokPetView = class extends import_obsidian4.ItemView {
     this.activeNoteChipText = label || "\u5F53\u524D\u7B14\u8BB0";
     if (this.activeNoteBtn)
       this.renderContextRail();
+  }
+  setSelectionChars(chars) {
+    this.selectionChars = chars && chars > 0 ? chars : null;
+    if (this.contextRailEl)
+      this.renderContextRail();
+  }
+  setContextInventory(inventory) {
+    this.contextInventory = inventory;
+    if (this.turnSummaryEl) {
+      this.turnSummaryEl.setAttr("title", inventory.line);
+      this.turnSummaryEl.dataset.truncated = inventory.truncated ? "true" : "false";
+    }
+  }
+  setCliStatus(ready, banner) {
+    this.cliReady = ready;
+    this.cliBanner = banner;
+    this.updateComposerPlaceholder();
+    if (!this.chatEl)
+      return;
+    if (this.state.messages.length === 0)
+      this.renderChat();
+    else
+      this.renderChat();
+  }
+  setPendingUndoAvailable(value) {
+    this.pendingUndoAvailable = value;
+    if (this.chatEl && this.state.messages.length > 0)
+      this.renderChat();
   }
   setTurnContextSummary(line, truncated) {
     this.turnSummaryLine = line;
@@ -20101,20 +20658,30 @@ var GrokPetView = class extends import_obsidian4.ItemView {
     this.newChatBtn = this.makeIconButton(headerActions, "plus", "\u65B0\u5BF9\u8BDD", () => this.onNewChat?.());
     this.chatEl = root.createDiv({ cls: "grok-pet-chat" });
     this.chatEl.setAttr("aria-live", "polite");
+    this.chatEl.addEventListener("scroll", () => this.updateJumpToLatestVisibility());
     this.dropTargetEl = root.createDiv({ cls: "grok-pet-drop-target", text: "\u677E\u5F00\u4EE5\u6DFB\u52A0\u5230\u4E0A\u4E0B\u6587" });
     this.dropTargetEl.hidden = true;
     const composerShell = root.createDiv({ cls: "grok-pet-composer-shell" });
     this.mentionMenuEl = composerShell.createDiv({ cls: "grok-pet-mention-menu" });
     this.mentionMenuEl.hidden = true;
-    this.turnSummaryEl = composerShell.createDiv({
+    const summaryRow = composerShell.createDiv({ cls: "grok-pet-summary-row" });
+    this.turnSummaryEl = summaryRow.createEl("button", {
       cls: "grok-pet-turn-summary",
+      attr: { type: "button", title: "\u67E5\u770B\u672C\u8F6E\u4E0A\u4E0B\u6587\u660E\u7EC6" },
       text: this.turnSummaryLine
     });
+    this.turnSummaryEl.addEventListener("click", () => this.onOpenContextInventory?.());
+    this.jumpToLatestBtn = summaryRow.createEl("button", {
+      cls: "grok-pet-jump-latest clickable-icon",
+      attr: { type: "button", title: "\u8DF3\u5230\u6700\u65B0" }
+    });
+    (0, import_obsidian6.setIcon)(this.jumpToLatestBtn, "arrow-down");
+    this.jumpToLatestBtn.addEventListener("click", () => this.scrollChatToBottom(true));
     this.contextRailEl = composerShell.createDiv({ cls: "grok-pet-context-rail" });
     const composer = composerShell.createDiv({ cls: "grok-pet-composer" });
     this.inputEl = composer.createEl("textarea", {
       cls: "grok-pet-input",
-      attr: { rows: "1", placeholder: "\u6D88\u606F", "aria-label": "\u6D88\u606F" }
+      attr: { rows: "1", placeholder: "", "aria-label": "\u6D88\u606F" }
     });
     this.inputEl.addEventListener("input", () => {
       this.resizeInput();
@@ -20157,6 +20724,8 @@ var GrokPetView = class extends import_obsidian4.ItemView {
     this.renderChat();
     this.renderContextRail();
     this.renderStatus();
+    this.updateComposerPlaceholder();
+    this.updateJumpToLatestVisibility();
     this.onDraftContextChange?.();
   }
   async onClose() {
@@ -20176,7 +20745,7 @@ var GrokPetView = class extends import_obsidian4.ItemView {
   insertContextPaths(paths) {
     const tokens = paths.map((path2) => {
       const abstract = this.app.vault.getAbstractFileByPath(path2);
-      return abstract instanceof import_obsidian4.TFolder ? `@{${path2}}` : `@[[${path2}]]`;
+      return abstract instanceof import_obsidian6.TFolder ? `@{${path2}}` : `@[[${path2}]]`;
     });
     if (tokens.length === 0)
       return;
@@ -20204,6 +20773,8 @@ var GrokPetView = class extends import_obsidian4.ItemView {
     this.renderStatus();
   }
   addChatMessage(message) {
+    const wasEmpty = this.state.messages.length === 0;
+    const shouldStick = this.shouldAutoScroll();
     this.state.messages.push(message);
     if (this.state.messages.length > 240) {
       const dropped = this.state.messages.length - 240;
@@ -20213,26 +20784,40 @@ var GrokPetView = class extends import_obsidian4.ItemView {
         return;
       }
     }
-    this.appendMessageNode(message);
-    this.scrollChatToBottom();
+    if (wasEmpty) {
+      this.renderChat();
+      return;
+    }
+    this.appendMessageNode(message, shouldStick);
   }
   updateChatMessage(id, patch) {
     const message = this.state.messages.find((item) => item.id === id);
     if (!message)
       return;
     const prevStatus = message.status;
+    const shouldStick = this.shouldAutoScroll();
     Object.assign(message, patch);
     const node = this.messageNodeMap.get(id);
     if (node && message.status === "streaming" && prevStatus === "streaming" && patch.text !== void 0 && patch.thoughtText === void 0 && patch.status !== "complete" && patch.status !== "error" && patch.status !== "cancelled") {
-      node.textEl.setText(message.text || "\u2026");
-      this.scrollChatToBottom();
+      node.textEl.setText(formatStreamingMarkdownPreview(message.text || "\u2026"));
+      if (hasMarkdownStructure(message.text || ""))
+        node.row.classList.add("has-markdown-structure");
+      else
+        node.row.classList.remove("has-markdown-structure");
+      if (shouldStick)
+        this.scrollChatToBottom(true);
+      else
+        this.updateJumpToLatestVisibility();
       return;
     }
     if (node && this.chatEl.contains(node.row)) {
       const next = this.buildMessageRow(message);
       node.row.replaceWith(next.row);
       this.messageNodeMap.set(id, next);
-      this.scrollChatToBottom();
+      if (shouldStick)
+        this.scrollChatToBottom(true);
+      else
+        this.updateJumpToLatestVisibility();
       return;
     }
     this.renderChat();
@@ -20265,7 +20850,7 @@ var GrokPetView = class extends import_obsidian4.ItemView {
       cls: "grok-pet-icon-button clickable-icon",
       attr: { "aria-label": label, title: label }
     });
-    (0, import_obsidian4.setIcon)(button, icon);
+    (0, import_obsidian6.setIcon)(button, icon);
     button.addEventListener("click", onClick);
     return button;
   }
@@ -20315,7 +20900,7 @@ var GrokPetView = class extends import_obsidian4.ItemView {
       return file2 ? decodeURIComponent(file2) : null;
     }
     const abstract = this.app.vault.getAbstractFileByPath(value);
-    return abstract instanceof import_obsidian4.TFile || abstract instanceof import_obsidian4.TFolder ? value : null;
+    return abstract instanceof import_obsidian6.TFile || abstract instanceof import_obsidian6.TFolder ? value : null;
   }
   handleKeyDown(event) {
     if (!this.mentionMenuEl.hidden) {
@@ -20412,7 +20997,7 @@ var GrokPetView = class extends import_obsidian4.ItemView {
       path: file2.path,
       mtime: file2.stat?.mtime ?? 0
     }));
-    const folders = this.app.vault.getAllLoadedFiles().filter((file2) => file2 instanceof import_obsidian4.TFolder).map((folder) => ({
+    const folders = this.app.vault.getAllLoadedFiles().filter((file2) => file2 instanceof import_obsidian6.TFolder).map((folder) => ({
       kind: "folder",
       key: folder.path,
       title: folder.name,
@@ -20475,7 +21060,7 @@ var GrokPetView = class extends import_obsidian4.ItemView {
         attr: { type: "button", title: suggestion.path ?? suggestion.subtitle }
       });
       const icon = item.createSpan({ cls: "grok-pet-mention-icon" });
-      (0, import_obsidian4.setIcon)(icon, suggestion.kind === "file" ? "file-text" : suggestion.kind === "folder" ? "folder" : suggestion.kind === "tag" ? "hash" : "sparkles");
+      (0, import_obsidian6.setIcon)(icon, suggestion.kind === "file" ? "file-text" : suggestion.kind === "folder" ? "folder" : suggestion.kind === "tag" ? "hash" : "sparkles");
       const labels = item.createSpan({ cls: "grok-pet-mention-labels" });
       labels.createSpan({ cls: "grok-pet-mention-name", text: suggestion.title });
       labels.createSpan({ cls: "grok-pet-mention-path", text: suggestion.subtitle });
@@ -20510,7 +21095,7 @@ var GrokPetView = class extends import_obsidian4.ItemView {
     if (!suggestion?.path || suggestion.kind !== "file")
       return;
     const file2 = this.app.vault.getAbstractFileByPath(suggestion.path);
-    if (!(file2 instanceof import_obsidian4.TFile) || ["png", "jpg", "jpeg", "gif", "webp", "pdf"].includes(file2.extension.toLowerCase()))
+    if (!(file2 instanceof import_obsidian6.TFile) || ["png", "jpg", "jpeg", "gif", "webp", "pdf"].includes(file2.extension.toLowerCase()))
       return;
     try {
       const content = await this.app.vault.cachedRead(file2);
@@ -20566,12 +21151,18 @@ var GrokPetView = class extends import_obsidian4.ItemView {
       cls: `grok-pet-context-chip${this.state.includeActiveNote ? " is-active" : ""}${this.state.includeActiveNote && !this.activeNotePath ? " is-empty" : ""}`,
       attr: { title: chipTitle }
     });
-    (0, import_obsidian4.setIcon)(this.activeNoteBtn, "file-text");
+    (0, import_obsidian6.setIcon)(this.activeNoteBtn, "file-text");
     this.activeNoteBtn.createSpan({ text: chipLabel });
     this.activeNoteBtn.addEventListener(
       "click",
       () => this.onToggleActiveNote?.(!this.state.includeActiveNote)
     );
+    if (this.selectionChars && this.selectionChars > 0) {
+      const selectionChip = this.contextRailEl.createDiv({ cls: "grok-pet-selection-chip" });
+      const icon = selectionChip.createSpan();
+      (0, import_obsidian6.setIcon)(icon, "scan-text");
+      selectionChip.createSpan({ text: `\u9009\u533A ${this.selectionChars} \u5B57` });
+    }
     for (const tab of this.openTabs) {
       const chip = this.contextRailEl.createEl("button", {
         cls: `grok-pet-context-chip grok-pet-open-tab${tab.selected ? " is-active" : ""}`,
@@ -20580,7 +21171,7 @@ var GrokPetView = class extends import_obsidian4.ItemView {
           title: tab.selected ? `\u53D6\u6D88\u4F5C\u4E3A\u4E0A\u4E0B\u6587\uFF1A${tab.path}` : `\u52A0\u5165\u4E0A\u4E0B\u6587\uFF08\u6700\u591A 3 \u4E2A\uFF09\uFF1A${tab.path}`
         }
       });
-      (0, import_obsidian4.setIcon)(chip, "layers");
+      (0, import_obsidian6.setIcon)(chip, "layers");
       chip.createSpan({ text: tab.label });
       chip.addEventListener("click", () => this.onToggleOpenTab?.(tab.path, !tab.selected));
     }
@@ -20597,13 +21188,13 @@ var GrokPetView = class extends import_obsidian4.ItemView {
         cls: "grok-pet-chip-remove",
         attr: { "aria-label": "\u79FB\u9664\u56FE\u7247", title: "\u79FB\u9664\u56FE\u7247" }
       });
-      (0, import_obsidian4.setIcon)(remove, "x");
+      (0, import_obsidian6.setIcon)(remove, "x");
       remove.addEventListener("click", () => this.onRemoveAttachment?.(attachment.id));
     }
     for (const context of this.getDraftContexts()) {
       const chip = this.contextRailEl.createDiv({ cls: "grok-pet-draft-context" });
       const icon = chip.createSpan();
-      (0, import_obsidian4.setIcon)(
+      (0, import_obsidian6.setIcon)(
         icon,
         context.kind === "tag" ? "hash" : context.kind === "folder" ? "folder" : "file-text"
       );
@@ -20612,7 +21203,7 @@ var GrokPetView = class extends import_obsidian4.ItemView {
         cls: "grok-pet-draft-remove",
         attr: { "aria-label": "\u79FB\u9664\u4E0A\u4E0B\u6587", title: "\u79FB\u9664\u4E0A\u4E0B\u6587" }
       });
-      (0, import_obsidian4.setIcon)(remove, "x");
+      (0, import_obsidian6.setIcon)(remove, "x");
       remove.addEventListener("click", () => {
         this.inputEl.value = this.inputEl.value.replace(context.token, "").replace(/ {2,}/g, " ");
         this.renderContextRail();
@@ -20640,17 +21231,26 @@ var GrokPetView = class extends import_obsidian4.ItemView {
       (item, index, array2) => array2.findIndex((other) => other.token === item.token) === index
     );
   }
-  scrollChatToBottom() {
+  scrollChatToBottom(force = false) {
     if (!this.chatEl)
       return;
+    if (!force && !this.shouldAutoScroll()) {
+      this.updateJumpToLatestVisibility();
+      return;
+    }
     this.chatEl.scrollTop = this.chatEl.scrollHeight;
+    this.updateJumpToLatestVisibility();
   }
-  appendMessageNode(message) {
+  appendMessageNode(message, autoScroll = true) {
     if (!this.chatEl)
       return;
     const node = this.buildMessageRow(message);
     this.chatEl.appendChild(node.row);
     this.messageNodeMap.set(message.id, node);
+    if (autoScroll)
+      this.scrollChatToBottom(true);
+    else
+      this.updateJumpToLatestVisibility();
   }
   buildMessageRow(message) {
     const row = document.createElement("div");
@@ -20691,14 +21291,16 @@ var GrokPetView = class extends import_obsidian4.ItemView {
     const textEl = body.createDiv({ cls: "grok-pet-message-text" });
     if (message.role === "assistant" && message.status !== "streaming") {
       if (message.text.trim()) {
-        void import_obsidian4.MarkdownRenderer.render(this.app, message.text, textEl, "", this);
+        void import_obsidian6.MarkdownRenderer.render(this.app, message.text, textEl, "", this);
       } else if (message.status === "cancelled") {
         textEl.setText("\uFF08\u5DF2\u505C\u6B62\uFF0C\u5C1A\u672A\u751F\u6210\u5185\u5BB9\uFF09");
       }
     } else if (message.role === "user") {
       this.renderUserText(textEl, message.text);
     } else {
-      textEl.setText(message.text || (message.thoughtText ? "" : "\u2026"));
+      textEl.setText(formatStreamingMarkdownPreview(message.text || (message.thoughtText ? "" : "\u2026")));
+      if (hasMarkdownStructure(message.text || ""))
+        row.classList.add("has-markdown-structure");
     }
     if (message.role === "assistant" && message.model) {
       body.createDiv({ cls: "grok-pet-message-model", text: message.model });
@@ -20723,8 +21325,11 @@ var GrokPetView = class extends import_obsidian4.ItemView {
     if (message.sources?.length) {
       const sources = body.createDiv({ cls: "grok-pet-sources" });
       for (const source of message.sources) {
-        const button = sources.createEl("button", { attr: { title: source.path } });
-        (0, import_obsidian4.setIcon)(
+        const button = sources.createEl("button", {
+          cls: "grok-pet-source-chip",
+          attr: { type: "button", title: source.path }
+        });
+        (0, import_obsidian6.setIcon)(
           button,
           source.kind === "tag" ? "hash" : source.kind === "folder" ? "folder" : source.kind === "open-tab" ? "layers" : "file-text"
         );
@@ -20741,6 +21346,15 @@ var GrokPetView = class extends import_obsidian4.ItemView {
         () => this.onCopyMessage?.(message)
       );
       copy.addClass("grok-pet-message-action");
+      if (this.pendingUndoAvailable) {
+        const undo = this.makeIconButton(
+          actions,
+          "undo-2",
+          "\u64A4\u9500\u4E0A\u6B21\u5E94\u7528",
+          () => this.onUndoLastApply?.()
+        );
+        undo.addClass("grok-pet-message-action");
+      }
       if (message.status === "error") {
         const retry = this.makeIconButton(
           actions,
@@ -20760,6 +21374,27 @@ var GrokPetView = class extends import_obsidian4.ItemView {
       }
       if (message.status === "complete" || message.status === "cancelled") {
         if (message.text.trim()) {
+          const insert = this.makeIconButton(
+            actions,
+            "corner-down-left",
+            "\u63D2\u5165\u5230\u5F53\u524D\u7B14\u8BB0",
+            () => this.onWriteBackMessage?.("insert", message.text)
+          );
+          const append = this.makeIconButton(
+            actions,
+            "list-plus",
+            "\u8FFD\u52A0\u5230\u5F53\u524D\u7B14\u8BB0",
+            () => this.onWriteBackMessage?.("append", message.text)
+          );
+          const create = this.makeIconButton(
+            actions,
+            "file-plus",
+            "\u65B0\u5EFA\u7B14\u8BB0",
+            () => this.onWriteBackMessage?.("create", message.text)
+          );
+          insert.addClass("grok-pet-message-action");
+          append.addClass("grok-pet-message-action");
+          create.addClass("grok-pet-message-action");
           const apply = this.makeIconButton(
             actions,
             "file-diff",
@@ -20791,12 +21426,22 @@ var GrokPetView = class extends import_obsidian4.ItemView {
   renderChat() {
     if (!this.chatEl)
       return;
+    if (this.state.messages.length === 0) {
+      this.messageNodeMap.clear();
+      this.renderEmptyState();
+      return;
+    }
+    const shouldStick = this.shouldAutoScroll();
     this.chatEl.empty();
     this.messageNodeMap.clear();
+    this.renderCliBanner();
     for (const message of this.state.messages) {
-      this.appendMessageNode(message);
+      this.appendMessageNode(message, false);
     }
-    this.scrollChatToBottom();
+    if (shouldStick)
+      this.scrollChatToBottom(true);
+    else
+      this.updateJumpToLatestVisibility();
   }
   renderUserText(container, text) {
     const pattern = /@\[\[([^\]]+)\]\]|@\{([^}]+)\}|#([\p{L}\p{N}_/-]+)/gu;
@@ -20810,15 +21455,81 @@ var GrokPetView = class extends import_obsidian4.ItemView {
       const tag = match[3];
       const raw = filePath ?? folderPath ?? tag;
       const label = tag ? `#${tag}` : `@${(raw.split("/").pop() ?? raw).replace(/\.[^.]+$/, "")}`;
-      container.createSpan({
-        cls: "grok-pet-file-pill",
-        text: label,
-        attr: { title: raw }
+      const pill = container.createEl("button", {
+        cls: "grok-pet-file-pill grok-pet-source-chip",
+        attr: { type: "button", title: raw }
       });
+      (0, import_obsidian6.setIcon)(pill, tag ? "hash" : raw.includes("/") ? "folder" : "file-text");
+      pill.createSpan({ text: label });
+      pill.addEventListener("click", () => this.onOpenSource?.(tag ? `#${tag}` : raw));
       cursor = index + match[0].length;
     }
     if (cursor < text.length)
       container.appendText(text.slice(cursor));
+  }
+  shouldAutoScroll() {
+    if (!this.chatEl)
+      return true;
+    return shouldAutoScrollOnUpdate({
+      scrollTop: this.chatEl.scrollTop,
+      clientHeight: this.chatEl.clientHeight,
+      scrollHeight: this.chatEl.scrollHeight
+    });
+  }
+  updateJumpToLatestVisibility() {
+    if (!this.jumpToLatestBtn || !this.chatEl)
+      return;
+    const metrics = {
+      scrollTop: this.chatEl.scrollTop,
+      clientHeight: this.chatEl.clientHeight,
+      scrollHeight: this.chatEl.scrollHeight
+    };
+    this.jumpToLatestBtn.hidden = !shouldShowJumpToLatest(metrics, this.state.messages.length > 0);
+  }
+  updateComposerPlaceholder() {
+    if (!this.inputEl)
+      return;
+    this.inputEl.placeholder = this.cliReady ? this.state.includeActiveNote ? "\u8F93\u5165\u6D88\u606F\uFF0C@ \u9009\u6587\u4EF6\uFF0C# \u9009\u6807\u7B7E\uFF0C/ \u9009\u63D0\u793A\u8BCD" : "\u8F93\u5165\u6D88\u606F\uFF0C@ \u9009\u6587\u4EF6\uFF0C# \u9009\u6807\u7B7E\uFF0C/ \u9009\u63D0\u793A\u8BCD\uFF08\u53EF\u5728\u5DE6\u4FA7\u5F00\u542F\u5F53\u524D\u7B14\u8BB0\uFF09" : "\u5148\u5B89\u88C5\u5E76\u767B\u5F55 grok\uFF0C\u518D\u53D1\u9001\u6D88\u606F";
+  }
+  renderEmptyState() {
+    if (!this.chatEl)
+      return;
+    this.chatEl.empty();
+    if (!this.cliReady) {
+      this.renderCliBanner();
+    }
+    const empty = this.chatEl.createDiv({ cls: "grok-pet-empty-state" });
+    empty.createDiv({
+      cls: "grok-pet-empty-title",
+      text: this.cliReady ? "\u5F00\u59CB\u4E00\u4E2A\u65B0\u5BF9\u8BDD" : "CLI \u5C1A\u672A\u5C31\u7EEA"
+    });
+    empty.createDiv({
+      cls: "grok-pet-empty-text",
+      text: this.cliReady ? "\u8F93\u5165\u6D88\u606F\uFF0C\u6216\u7528 @\u3001#\u3001/ \u9009\u62E9\u4E0A\u4E0B\u6587\u4E0E\u5DE5\u4F5C\u6D41\u3002" : this.cliBanner || "\u8BF7\u5148\u5B89\u88C5\u5E76\u767B\u5F55 grok\u3002"
+    });
+    if (this.cliReady) {
+      empty.createDiv({
+        cls: "grok-pet-empty-hint",
+        text: "\u4F60\u4E5F\u53EF\u4EE5\u62D6\u5165\u56FE\u7247\u3001\u7C98\u8D34\u622A\u56FE\uFF0C\u6216\u4ECE\u53F3\u4E0A\u89D2\u6253\u5F00\u5386\u53F2\u5BF9\u8BDD\u3002"
+      });
+    }
+    this.updateJumpToLatestVisibility();
+  }
+  renderCliBanner() {
+    if (!this.chatEl || this.cliReady)
+      return;
+    const banner = this.chatEl.createDiv({ cls: "grok-pet-cli-banner" });
+    banner.createDiv({
+      cls: "grok-pet-cli-banner-text",
+      text: this.cliBanner || "\u672A\u68C0\u6D4B\u5230 grok\u3002\u8BF7\u5148\u5B89\u88C5\u5E76\u767B\u5F55 Grok CLI\u3002"
+    });
+    const actions = banner.createDiv({ cls: "grok-pet-cli-banner-actions" });
+    const retry = actions.createEl("button", { text: "\u91CD\u65B0\u68C0\u6D4B", attr: { type: "button" } });
+    retry.addEventListener("click", () => void this.onRefreshCli?.());
+    const settings = actions.createEl("button", { text: "\u6253\u5F00\u8BBE\u7F6E", attr: { type: "button" } });
+    settings.addEventListener("click", () => void this.onOpenSettings?.());
+    const test = actions.createEl("button", { cls: "mod-cta", text: "\u6D4B\u8BD5\u547D\u4EE4", attr: { type: "button" } });
+    test.addEventListener("click", () => void this.onTestCli?.());
   }
   renderStatus() {
     if (!this.avatarEl)
@@ -20833,10 +21544,11 @@ var GrokPetView = class extends import_obsidian4.ItemView {
     this.historyBtn.disabled = running;
     this.attachBtn.disabled = running;
     this.inputEl.disabled = running;
+    this.updateComposerPlaceholder();
     if (running)
       this.closeSuggestionMenu();
     this.actionBtn.empty();
-    (0, import_obsidian4.setIcon)(this.actionBtn, running ? "square" : "arrow-up");
+    (0, import_obsidian6.setIcon)(this.actionBtn, running ? "square" : "arrow-up");
     this.actionBtn.className = `grok-pet-action${running ? " is-stop" : ""}`;
     this.actionBtn.setAttr("aria-label", running ? "\u505C\u6B62" : "\u53D1\u9001");
     this.actionBtn.setAttr("title", running ? "\u505C\u6B62" : "\u53D1\u9001");
@@ -20844,7 +21556,61 @@ var GrokPetView = class extends import_obsidian4.ItemView {
 };
 
 // src/settings.ts
-var import_obsidian5 = require("obsidian");
+var import_obsidian7 = require("obsidian");
+
+// src/contextLimits.ts
+var DEFAULT_CONTEXT_LIMITS = {
+  maxFilesInMessage: 8,
+  maxFoldersInMessage: 4,
+  maxTagsInMessage: 6,
+  maxExpandedPaths: 32,
+  maxFilesPerFolder: 20,
+  maxFilesPerTag: 20,
+  maxCharsPerFile: 5e4,
+  maxCharsTotal: 18e4
+};
+function clampInt(value, min, max, fallback) {
+  const n = typeof value === "number" ? value : Number(value);
+  if (!Number.isFinite(n))
+    return fallback;
+  return Math.min(max, Math.max(min, Math.floor(n)));
+}
+function mergeContextLimits(overrides) {
+  const o = overrides ?? {};
+  const d = DEFAULT_CONTEXT_LIMITS;
+  return {
+    maxFilesInMessage: clampInt(o.maxFilesInMessage, 1, 64, d.maxFilesInMessage),
+    maxFoldersInMessage: clampInt(o.maxFoldersInMessage, 0, 32, d.maxFoldersInMessage),
+    maxTagsInMessage: clampInt(o.maxTagsInMessage, 0, 32, d.maxTagsInMessage),
+    maxExpandedPaths: clampInt(o.maxExpandedPaths, 1, 200, d.maxExpandedPaths),
+    maxFilesPerFolder: clampInt(o.maxFilesPerFolder, 1, 200, d.maxFilesPerFolder),
+    maxFilesPerTag: clampInt(o.maxFilesPerTag, 1, 200, d.maxFilesPerTag),
+    maxCharsPerFile: clampInt(o.maxCharsPerFile, 1e3, 5e5, d.maxCharsPerFile),
+    maxCharsTotal: clampInt(o.maxCharsTotal, 5e3, 2e6, d.maxCharsTotal)
+  };
+}
+
+// src/timeoutFormat.ts
+function msToMinutesDisplay(ms) {
+  if (!Number.isFinite(ms) || ms <= 0)
+    return "0";
+  const minutes = ms / 6e4;
+  if (Number.isInteger(minutes))
+    return String(minutes);
+  const rounded = Math.round(minutes * 10) / 10;
+  return String(rounded);
+}
+function minutesInputToMs(input, minMs) {
+  const n = Number(String(input).trim());
+  if (!Number.isFinite(n) || n <= 0)
+    return null;
+  const ms = Math.floor(n * 6e4);
+  if (ms < minMs)
+    return null;
+  return ms;
+}
+
+// src/settings.ts
 var DEFAULT_SETTINGS = {
   grokPath: "",
   timeoutMs: 10 * 60 * 1e3,
@@ -20856,12 +21622,45 @@ var DEFAULT_SETTINGS = {
   historyLimit: 20,
   deleteAttachmentsOnCleanup: true,
   customPrompts: [
-    { id: "summarize", name: "\u603B\u7ED3", prompt: "\u8BF7\u603B\u7ED3\u4E0B\u9762\u7684\u5185\u5BB9\uFF0C\u63D0\u70BC\u5173\u952E\u7ED3\u8BBA\u548C\u884C\u52A8\u9879\u3002" },
-    { id: "polish", name: "\u6DA6\u8272", prompt: "\u8BF7\u628A\u4E0B\u9762\u7684\u5185\u5BB9\u6DA6\u8272\u6210\u6E05\u6670\u3001\u81EA\u7136\u7684\u4E2D\u6587 Markdown\u3002" },
-    { id: "translate", name: "\u7FFB\u8BD1", prompt: "\u8BF7\u5C06\u4E0B\u9762\u7684\u5185\u5BB9\u7FFB\u8BD1\u6210\u4E2D\u6587\uFF0C\u4FDD\u7559 Markdown \u7ED3\u6784\u3002" }
-  ]
+    {
+      id: "summarize",
+      name: "\u603B\u7ED3",
+      prompt: "\u8BF7\u603B\u7ED3\u4E0B\u9762\u7684\u5185\u5BB9\uFF0C\u63D0\u70BC\u5173\u952E\u7ED3\u8BBA\u548C\u884C\u52A8\u9879\u3002",
+      description: "\u63D0\u70BC\u7ED3\u8BBA\u4E0E\u884C\u52A8\u9879",
+      isWorkflow: true
+    },
+    {
+      id: "polish",
+      name: "\u6DA6\u8272",
+      prompt: "\u8BF7\u628A\u4E0B\u9762\u7684\u5185\u5BB9\u6DA6\u8272\u6210\u6E05\u6670\u3001\u81EA\u7136\u7684\u4E2D\u6587 Markdown\u3002",
+      description: "\u6DA6\u8272\u4E3A\u6E05\u6670\u4E2D\u6587",
+      isWorkflow: true
+    },
+    {
+      id: "translate",
+      name: "\u7FFB\u8BD1",
+      prompt: "\u8BF7\u5C06\u4E0B\u9762\u7684\u5185\u5BB9\u7FFB\u8BD1\u6210\u4E2D\u6587\uFF0C\u4FDD\u7559 Markdown \u7ED3\u6784\u3002",
+      description: "\u8BD1\u4E3A\u4E2D\u6587\u5E76\u4FDD\u7559\u7ED3\u6784",
+      isWorkflow: true
+    },
+    {
+      id: "meeting-notes",
+      name: "\u4F1A\u8BAE\u7EAA\u8981",
+      prompt: "\u8BF7\u6839\u636E\u4E0B\u9762\u7684\u5185\u5BB9\u6574\u7406\u6210\u4F1A\u8BAE\u7EAA\u8981\uFF1A\u8BAE\u9898\u3001\u8BA8\u8BBA\u8981\u70B9\u3001\u51B3\u8BAE\u3001\u5F85\u529E\uFF08\u8D1F\u8D23\u4EBA/\u622A\u6B62\u65E5\u671F\u82E5\u53EF\u77E5\uFF09\u3002\u4F7F\u7528\u6E05\u6670 Markdown\u3002",
+      description: "\u5DE5\u4F5C\u6D41\uFF1A\u4F1A\u8BAE\u7EAA\u8981",
+      isWorkflow: true
+    },
+    {
+      id: "weekly-review",
+      name: "\u5468\u62A5\u590D\u76D8",
+      prompt: "\u8BF7\u628A\u4E0B\u9762\u5185\u5BB9\u6574\u7406\u6210\u5468\u62A5\u590D\u76D8\uFF1A\u672C\u5468\u8FDB\u5C55\u3001\u963B\u585E\u3001\u4E0B\u5468\u8BA1\u5212\u3001\u98CE\u9669\u3002\u6761\u76EE\u5316\uFF0C\u9002\u5408\u76F4\u63A5\u8D34\u8FDB\u7B14\u8BB0\u3002",
+      description: "\u5DE5\u4F5C\u6D41\uFF1A\u5468\u62A5\u590D\u76D8",
+      isWorkflow: true
+    }
+  ],
+  contextLimits: { ...DEFAULT_CONTEXT_LIMITS }
 };
-var GrokBuildSettingTab = class extends import_obsidian5.PluginSettingTab {
+var GrokBuildSettingTab = class extends import_obsidian7.PluginSettingTab {
   constructor(app, plugin) {
     super(app, plugin);
     this.plugin = plugin;
@@ -20871,7 +21670,7 @@ var GrokBuildSettingTab = class extends import_obsidian5.PluginSettingTab {
     containerEl.empty();
     containerEl.createEl("h2", { text: "Grok Obsidian" });
     containerEl.createEl("p", {
-      text: "\u6A21\u578B\u4E0E\u6743\u9650\u8DDF\u968F\u672C\u673A Grok Build / CLI \u914D\u7F6E\u3002\u804A\u5929\u9ED8\u8BA4\u53EA\u8BFB\uFF08plan\uFF09\uFF0C\u5199\u5165\u4EC5\u901A\u8FC7 Diff \u786E\u8BA4\u3002",
+      text: "\u6A21\u578B\u4E0E\u6743\u9650\u8DDF\u968F\u672C\u673A Grok Build / CLI \u914D\u7F6E\u3002\u804A\u5929\u9ED8\u8BA4\u53EA\u8BFB\uFF08plan\uFF09\uFF0C\u5199\u5165\u4EC5\u901A\u8FC7 Diff \u786E\u8BA4\u6216\u663E\u5F0F\u63D2\u5165\u7B14\u8BB0\u3002",
       cls: "setting-item-description"
     });
     const resolution = resolveGrokBinary(this.plugin.settings);
@@ -20881,18 +21680,22 @@ var GrokBuildSettingTab = class extends import_obsidian5.PluginSettingTab {
       path: "\u7CFB\u7EDF PATH",
       fallback: "\u5C1A\u672A\u627E\u5230"
     };
-    new import_obsidian5.Setting(containerEl).setName("\u5F53\u524D Grok CLI").setDesc(`${sourceLabels[resolution.source]}\uFF1A${resolution.path}`).addButton(
+    new import_obsidian7.Setting(containerEl).setName("\u5F53\u524D Grok CLI").setDesc(`${sourceLabels[resolution.source]}\uFF1A${resolution.path}\u3002\u9996\u6B21\u4F7F\u7528\u8BF7\u5148\u5728\u7EC8\u7AEF\u6267\u884C grok login\u3002`).addButton(
       (button) => button.setButtonText("\u91CD\u65B0\u68C0\u6D4B").onClick(() => {
-        this.display();
+        void this.plugin.refreshDefaultModelPublic().then(() => this.display());
+      })
+    ).addButton(
+      (button) => button.setButtonText("\u6D4B\u8BD5\u547D\u4EE4").setCta().onClick(() => {
+        void this.plugin.testGrokCliPublic();
       })
     );
-    new import_obsidian5.Setting(containerEl).setName("\u9ED8\u8BA4\u9644\u5E26\u5F53\u524D\u7B14\u8BB0").setDesc("\u65B0\u5BF9\u8BDD\u662F\u5426\u9ED8\u8BA4\u628A\u6700\u8FD1\u805A\u7126\u7684 Markdown \u7B14\u8BB0\u4F5C\u4E3A\u4E0A\u4E0B\u6587\uFF1B\u6BCF\u4E2A\u5BF9\u8BDD\u4E5F\u53EF\u5728\u9762\u677F\u4E2D\u5355\u72EC\u5207\u6362\u3002").addToggle(
+    new import_obsidian7.Setting(containerEl).setName("\u9ED8\u8BA4\u9644\u5E26\u5F53\u524D\u7B14\u8BB0").setDesc("\u65B0\u5BF9\u8BDD\u662F\u5426\u9ED8\u8BA4\u628A\u6700\u8FD1\u805A\u7126\u7684 Markdown \u7B14\u8BB0\u4F5C\u4E3A\u4E0A\u4E0B\u6587\uFF1B\u6BCF\u4E2A\u5BF9\u8BDD\u4E5F\u53EF\u5728\u9762\u677F\u4E2D\u5355\u72EC\u5207\u6362\u3002").addToggle(
       (tg) => tg.setValue(this.plugin.settings.includeActiveNoteByDefault).onChange(async (value) => {
         this.plugin.settings.includeActiveNoteByDefault = value;
         await this.plugin.saveSettings();
       })
     );
-    new import_obsidian5.Setting(containerEl).setName("\u5BF9\u8BDD\u5386\u53F2\u4E0A\u9650").setDesc("\u672C\u5730\u6700\u591A\u4FDD\u7559\u591A\u5C11\u4E2A\u5BF9\u8BDD\u3002\u4FEE\u6539\u540E\u7ACB\u5373\u751F\u6548\u3002").addText(
+    new import_obsidian7.Setting(containerEl).setName("\u5BF9\u8BDD\u5386\u53F2\u4E0A\u9650").setDesc("\u672C\u5730\u6700\u591A\u4FDD\u7559\u591A\u5C11\u4E2A\u5BF9\u8BDD\uFF08\u7F6E\u9876\u5BF9\u8BDD\u4F18\u5148\u4FDD\u7559\uFF09\u3002\u4FEE\u6539\u540E\u7ACB\u5373\u751F\u6548\u3002").addText(
       (text) => text.setValue(String(this.plugin.settings.historyLimit)).onChange(async (value) => {
         const n = Number(value);
         if (!Number.isFinite(n) || n < 1)
@@ -20902,35 +21705,77 @@ var GrokBuildSettingTab = class extends import_obsidian5.PluginSettingTab {
         await this.plugin.saveSettings();
       })
     );
-    new import_obsidian5.Setting(containerEl).setName("\u6E05\u7406\u65F6\u5220\u9664\u622A\u56FE\u9644\u4EF6").setDesc("\u79FB\u9664\u5F85\u53D1\u9001\u56FE\u7247\u3001\u5220\u9664\u5BF9\u8BDD\uFF0C\u6216\u6267\u884C\u300C\u6E05\u7406\u5B64\u7ACB\u622A\u56FE\u300D\u65F6\uFF0C\u540C\u6B65\u5220\u9664 Vault \u4E2D\u5BF9\u5E94\u7684 Grok Screenshot \u6587\u4EF6\u3002").addToggle(
+    new import_obsidian7.Setting(containerEl).setName("\u6E05\u7406\u65F6\u5220\u9664\u622A\u56FE\u9644\u4EF6").setDesc("\u79FB\u9664\u5F85\u53D1\u9001\u56FE\u7247\u3001\u5220\u9664\u5BF9\u8BDD\uFF0C\u6216\u6267\u884C\u300C\u6E05\u7406\u5B64\u7ACB\u622A\u56FE\u300D\u65F6\uFF0C\u540C\u6B65\u5220\u9664 Vault \u4E2D\u5BF9\u5E94\u7684 Grok Screenshot \u6587\u4EF6\u3002").addToggle(
       (tg) => tg.setValue(this.plugin.settings.deleteAttachmentsOnCleanup).onChange(async (value) => {
         this.plugin.settings.deleteAttachmentsOnCleanup = value;
         await this.plugin.saveSettings();
       })
     );
-    new import_obsidian5.Setting(containerEl).setName("\u6E05\u7406\u5B64\u7ACB\u622A\u56FE").setDesc("\u5220\u9664 Vault \u4E2D\u540D\u4E3A Grok Screenshot \u4E14\u672A\u88AB\u4EFB\u4F55\u5BF9\u8BDD\u5F15\u7528\u7684\u56FE\u7247\u3002").addButton(
+    new import_obsidian7.Setting(containerEl).setName("\u6E05\u7406\u5B64\u7ACB\u622A\u56FE").setDesc("\u5220\u9664 Vault \u4E2D\u540D\u4E3A Grok Screenshot \u4E14\u672A\u88AB\u4EFB\u4F55\u5BF9\u8BDD\u5F15\u7528\u7684\u56FE\u7247\u3002").addButton(
       (button) => button.setButtonText("\u7ACB\u5373\u6E05\u7406").onClick(async () => {
         const count = await this.plugin.cleanupOrphanScreenshots();
         button.setButtonText(count > 0 ? `\u5DF2\u5220\u9664 ${count} \u4E2A` : "\u6CA1\u6709\u53EF\u6E05\u7406\u9879");
         window.setTimeout(() => button.setButtonText("\u7ACB\u5373\u6E05\u7406"), 2e3);
       })
     );
-    new import_obsidian5.Setting(containerEl).setName("\u659C\u6760\u63D0\u793A\u8BCD").setDesc("\u6BCF\u884C\u4E00\u4E2A\uFF1A\u540D\u79F0=\u63D0\u793A\u8BCD\u3002\u8F93\u5165 / \u53EF\u9009\u62E9\u3002").addTextArea((ta) => {
-      ta.setValue(
-        this.plugin.settings.customPrompts.map((item) => `${item.name}=${item.prompt}`).join("\n")
+    containerEl.createEl("h3", { text: "\u659C\u6760\u63D0\u793A\u8BCD\u4E0E\u5DE5\u4F5C\u6D41" });
+    containerEl.createEl("p", {
+      cls: "setting-item-description",
+      text: "\u5728\u8F93\u5165\u6846\u8F93\u5165 / \u53EF\u9009\u7528\u3002\u6807\u8BB0\u4E3A\u5DE5\u4F5C\u6D41\u7684\u6761\u76EE\u4F1A\u5728\u83DC\u5355\u4E2D\u663E\u793A\u8BF4\u660E\u3002"
+    });
+    const prompts = this.plugin.settings.customPrompts ?? [];
+    for (let index = 0; index < prompts.length; index += 1) {
+      const item = prompts[index];
+      const row = containerEl.createDiv({ cls: "grok-settings-prompt-row" });
+      new import_obsidian7.Setting(row).setName(item.isWorkflow ? `\u5DE5\u4F5C\u6D41 \xB7 ${item.name || "\u672A\u547D\u540D"}` : item.name || `\u63D0\u793A\u8BCD ${index + 1}`).setDesc(item.description || item.prompt.slice(0, 80)).addText((text) => {
+        text.setPlaceholder("\u540D\u79F0").setValue(item.name);
+        text.onChange(async (value) => {
+          item.name = value.trim() || item.name;
+          await this.plugin.saveSettings();
+        });
+      }).addToggle(
+        (tg) => tg.setTooltip("\u5DE5\u4F5C\u6D41").setValue(Boolean(item.isWorkflow)).onChange(async (value) => {
+          item.isWorkflow = value;
+          await this.plugin.saveSettings();
+          this.display();
+        })
+      ).addButton(
+        (btn) => btn.setButtonText("\u5220\u9664").setWarning().onClick(async () => {
+          this.plugin.settings.customPrompts = prompts.filter((_, i) => i !== index);
+          await this.plugin.saveSettings();
+          this.display();
+        })
       );
-      ta.inputEl.rows = 5;
-      ta.inputEl.style.width = "100%";
-      ta.onChange(async (value) => {
-        this.plugin.settings.customPrompts = value.split(/\r?\n/).map((line) => line.trim()).filter(Boolean).map((line, index) => {
-          const separator = line.indexOf("=");
-          const name = separator > 0 ? line.slice(0, separator).trim() : `\u63D0\u793A\u8BCD ${index + 1}`;
-          const prompt = separator > 0 ? line.slice(separator + 1).trim() : line;
-          return { id: `custom-${index}`, name, prompt };
+      new import_obsidian7.Setting(row).setName("\u8BF4\u660E").addText((text) => {
+        text.setPlaceholder("\u53EF\u9009\u8BF4\u660E").setValue(item.description ?? "");
+        text.onChange(async (value) => {
+          item.description = value.trim();
+          await this.plugin.saveSettings();
+        });
+      });
+      new import_obsidian7.Setting(row).setName("\u63D0\u793A\u8BCD\u6B63\u6587").addTextArea((ta) => {
+        ta.setValue(item.prompt);
+        ta.inputEl.rows = 3;
+        ta.inputEl.style.width = "100%";
+        ta.onChange(async (value) => {
+          item.prompt = value;
+          await this.plugin.saveSettings();
+        });
+      });
+    }
+    new import_obsidian7.Setting(containerEl).addButton(
+      (btn) => btn.setButtonText("\u6DFB\u52A0\u63D0\u793A\u8BCD").setCta().onClick(async () => {
+        this.plugin.settings.customPrompts.push({
+          id: createId("prompt"),
+          name: "\u65B0\u63D0\u793A\u8BCD",
+          prompt: "\u8BF7\u6839\u636E\u4E0B\u9762\u7684\u5185\u5BB9\u2026\u2026",
+          description: "",
+          isWorkflow: false
         });
         await this.plugin.saveSettings();
-      });
-    });
+        this.display();
+      })
+    );
     const advanced = containerEl.createEl("details", { cls: "grok-settings-advanced" });
     advanced.createEl("summary", { text: "\u9AD8\u7EA7\u9009\u9879" });
     const advancedBody = advanced.createDiv({ cls: "grok-settings-advanced-body" });
@@ -20938,32 +21783,34 @@ var GrokBuildSettingTab = class extends import_obsidian5.PluginSettingTab {
       cls: "setting-item-description",
       text: "\u4E00\u822C\u65E0\u9700\u4FEE\u6539\u3002\u6A21\u578B\u8BF7\u5728 Grok Build / CLI \u4E2D\u914D\u7F6E\uFF0C\u63D2\u4EF6\u59CB\u7EC8\u4F7F\u7528 CLI \u9ED8\u8BA4\u6A21\u578B\u3002"
     });
-    new import_obsidian5.Setting(advancedBody).setName("Grok \u53EF\u6267\u884C\u6587\u4EF6\u8DEF\u5F84").setDesc("\u53EF\u9009\u3002\u7559\u7A7A\u65F6\u4F9D\u6B21\u68C0\u67E5 ~/.grok/bin \u548C\u7CFB\u7EDF PATH\uFF1B\u586B\u5199\u540E\u4F18\u5148\u4F7F\u7528\u3002").addText(
+    new import_obsidian7.Setting(advancedBody).setName("Grok \u53EF\u6267\u884C\u6587\u4EF6\u8DEF\u5F84").setDesc("\u53EF\u9009\u3002\u7559\u7A7A\u65F6\u4F9D\u6B21\u68C0\u67E5 ~/.grok/bin \u548C\u7CFB\u7EDF PATH\uFF1B\u586B\u5199\u540E\u4F18\u5148\u4F7F\u7528\u3002").addText(
       (text) => text.setPlaceholder("\u7559\u7A7A\u5373\u53EF\u81EA\u52A8\u68C0\u6D4B").setValue(this.plugin.settings.grokPath).onChange(async (value) => {
         this.plugin.settings.grokPath = value.trim();
         await this.plugin.saveSettings();
         this.display();
       })
     );
-    new import_obsidian5.Setting(advancedBody).setName("\u603B\u8D85\u65F6\uFF08\u6BEB\u79D2\uFF09").setDesc("\u6574\u8F6E\u8BF7\u6C42\u6700\u957F\u7B49\u5F85\u65F6\u95F4\u3002\u6700\u5C0F 10000\u3002").addText(
-      (text) => text.setValue(String(this.plugin.settings.timeoutMs)).onChange(async (value) => {
-        const n = Number(value);
-        if (!Number.isFinite(n) || n < 1e4)
+    new import_obsidian7.Setting(advancedBody).setName("\u603B\u8D85\u65F6\uFF08\u5206\u949F\uFF09").setDesc("\u6574\u8F6E\u8BF7\u6C42\u6700\u957F\u7B49\u5F85\u65F6\u95F4\u3002\u6700\u5C0F\u7EA6 0.2 \u5206\u949F\uFF0810 \u79D2\uFF09\u3002").addText(
+      (text) => text.setValue(msToMinutesDisplay(this.plugin.settings.timeoutMs)).onChange(async (value) => {
+        const ms = minutesInputToMs(value, 1e4);
+        if (ms == null)
           return;
-        this.plugin.settings.timeoutMs = Math.floor(n);
+        this.plugin.settings.timeoutMs = ms;
         await this.plugin.saveSettings();
       })
     );
-    new import_obsidian5.Setting(advancedBody).setName("\u65E0\u8FDB\u5EA6\u8D85\u65F6\uFF08\u6BEB\u79D2\uFF09").setDesc("\u8FDE\u7EED\u65E0\u601D\u8003/\u8F93\u51FA\u8FDB\u5EA6\u8D85\u8FC7\u8BE5\u65F6\u95F4\u5219\u7EC8\u6B62\uFF08\u4F1A\u88AB\u603B\u8D85\u65F6\u4E0A\u9650\u622A\u65AD\uFF09\u3002\u6700\u5C0F 5000\uFF0C\u9ED8\u8BA4 120000\u3002").addText(
-      (text) => text.setValue(String(this.plugin.settings.idleTimeoutMs ?? DEFAULT_SETTINGS.idleTimeoutMs)).onChange(async (value) => {
-        const n = Number(value);
-        if (!Number.isFinite(n) || n < 5e3)
+    new import_obsidian7.Setting(advancedBody).setName("\u65E0\u8FDB\u5EA6\u8D85\u65F6\uFF08\u5206\u949F\uFF09").setDesc("\u8FDE\u7EED\u65E0\u601D\u8003/\u8F93\u51FA\u8FDB\u5EA6\u8D85\u8FC7\u8BE5\u65F6\u95F4\u5219\u7EC8\u6B62\u3002\u6700\u5C0F\u7EA6 0.1 \u5206\u949F\uFF085 \u79D2\uFF09\uFF0C\u9ED8\u8BA4 2 \u5206\u949F\u3002").addText(
+      (text) => text.setValue(
+        msToMinutesDisplay(this.plugin.settings.idleTimeoutMs ?? DEFAULT_SETTINGS.idleTimeoutMs)
+      ).onChange(async (value) => {
+        const ms = minutesInputToMs(value, 5e3);
+        if (ms == null)
           return;
-        this.plugin.settings.idleTimeoutMs = Math.floor(n);
+        this.plugin.settings.idleTimeoutMs = ms;
         await this.plugin.saveSettings();
       })
     );
-    new import_obsidian5.Setting(advancedBody).setName("\u6700\u5927\u56DE\u5408\u6570").setDesc("\u9650\u5236 agent \u5FAA\u73AF\u957F\u5EA6\uFF08\u6587\u672C\u4E0E\u56FE\u7247\u4F1A\u8BDD\u5747\u751F\u6548\uFF09\u3002").addText(
+    new import_obsidian7.Setting(advancedBody).setName("\u6700\u5927\u56DE\u5408\u6570").setDesc("\u9650\u5236 agent \u5FAA\u73AF\u957F\u5EA6\uFF08\u6587\u672C\u4E0E\u56FE\u7247\u4F1A\u8BDD\u5747\u751F\u6548\uFF09\u3002").addText(
       (text) => text.setValue(String(this.plugin.settings.maxTurns)).onChange(async (value) => {
         const n = Number(value);
         if (!Number.isFinite(n) || n < 1)
@@ -20972,13 +21819,13 @@ var GrokBuildSettingTab = class extends import_obsidian5.PluginSettingTab {
         await this.plugin.saveSettings();
       })
     );
-    new import_obsidian5.Setting(advancedBody).setName("\u7981\u7528\u5DE5\u5177").setDesc("\u9017\u53F7\u5206\u9694\u3002\u9ED8\u8BA4\u7981\u7528 shell\uFF1Arun_terminal_cmd").addText(
+    new import_obsidian7.Setting(advancedBody).setName("\u7981\u7528\u5DE5\u5177").setDesc("\u9017\u53F7\u5206\u9694\u3002\u9ED8\u8BA4\u7981\u7528 shell\uFF1Arun_terminal_cmd").addText(
       (text) => text.setValue(this.plugin.settings.disallowedTools).onChange(async (value) => {
         this.plugin.settings.disallowedTools = value.trim();
         await this.plugin.saveSettings();
       })
     );
-    new import_obsidian5.Setting(advancedBody).setName("\u989D\u5916\u89C4\u5219").setDesc("\u4F20\u7ED9 grok --rules\u3002\u7528\u4E8E\u98CE\u683C\u4E0E\u5B89\u5168\u6307\u5F15\uFF08\u4E0E CLI \u5168\u5C40\u89C4\u5219\u53E0\u52A0\uFF09\u3002").addTextArea((ta) => {
+    new import_obsidian7.Setting(advancedBody).setName("\u989D\u5916\u89C4\u5219").setDesc("\u4F20\u7ED9 grok --rules\u3002\u7528\u4E8E\u98CE\u683C\u4E0E\u5B89\u5168\u6307\u5F15\uFF08\u4E0E CLI \u5168\u5C40\u89C4\u5219\u53E0\u52A0\uFF09\u3002").addTextArea((ta) => {
       ta.setValue(this.plugin.settings.extraRules).onChange(async (value) => {
         this.plugin.settings.extraRules = value;
         await this.plugin.saveSettings();
@@ -20986,31 +21833,50 @@ var GrokBuildSettingTab = class extends import_obsidian5.PluginSettingTab {
       ta.inputEl.rows = 4;
       ta.inputEl.style.width = "100%";
     });
+    advancedBody.createEl("h4", { text: "\u4E0A\u4E0B\u6587\u4E0A\u9650" });
+    advancedBody.createEl("p", {
+      cls: "setting-item-description",
+      text: "\u63A7\u5236\u6BCF\u8F6E\u8BFB\u5165 Vault \u7684\u89C4\u6A21\uFF1B\u53D1\u9001\u4E0E\u6458\u8981\u5171\u7528\u540C\u4E00\u5957\u9650\u5236\u3002"
+    });
+    const limits = mergeContextLimits(this.plugin.settings.contextLimits);
+    const limitFields = [
+      { key: "maxFilesInMessage", name: "\u6D88\u606F\u5185 @ \u6587\u4EF6\u6570", desc: "\u5355\u6761\u6D88\u606F\u6700\u591A\u89E3\u6790\u7684\u6587\u4EF6\u63D0\u53CA" },
+      { key: "maxFoldersInMessage", name: "\u6D88\u606F\u5185\u6587\u4EF6\u5939\u6570", desc: "\u5355\u6761\u6D88\u606F\u6700\u591A\u89E3\u6790\u7684\u6587\u4EF6\u5939\u63D0\u53CA" },
+      { key: "maxTagsInMessage", name: "\u6D88\u606F\u5185\u6807\u7B7E\u6570", desc: "\u5355\u6761\u6D88\u606F\u6700\u591A\u89E3\u6790\u7684\u6807\u7B7E" },
+      { key: "maxExpandedPaths", name: "\u5C55\u5F00\u8DEF\u5F84\u603B\u6570", desc: "\u6587\u4EF6\u5939/\u6807\u7B7E\u5C55\u5F00\u540E\u7684\u6700\u5927\u8DEF\u5F84\u6570" },
+      { key: "maxFilesPerFolder", name: "\u6BCF\u6587\u4EF6\u5939\u6587\u4EF6\u6570", desc: "\u5355\u4E2A\u6587\u4EF6\u5939\u6700\u591A\u5C55\u5F00\u7684\u6587\u4EF6" },
+      { key: "maxFilesPerTag", name: "\u6BCF\u6807\u7B7E\u6587\u4EF6\u6570", desc: "\u5355\u4E2A\u6807\u7B7E\u6700\u591A\u5C55\u5F00\u7684\u6587\u4EF6" },
+      { key: "maxCharsPerFile", name: "\u5355\u6587\u4EF6\u5B57\u7B26\u4E0A\u9650", desc: "\u6BCF\u4E2A\u6587\u4EF6\u6700\u591A\u8BFB\u5165\u7684\u5B57\u7B26\u6570" },
+      { key: "maxCharsTotal", name: "\u603B\u5B57\u7B26\u4E0A\u9650", desc: "\u672C\u8F6E Vault \u6B63\u6587\u5408\u8BA1\u5B57\u7B26\u4E0A\u9650" }
+    ];
+    for (const field of limitFields) {
+      new import_obsidian7.Setting(advancedBody).setName(field.name).setDesc(field.desc).addText(
+        (text) => text.setValue(String(limits[field.key])).onChange(async (value) => {
+          const n = Number(value);
+          if (!Number.isFinite(n) || n < 1)
+            return;
+          const next = { ...this.plugin.settings.contextLimits ?? {}, [field.key]: Math.floor(n) };
+          this.plugin.settings.contextLimits = mergeContextLimits(next);
+          await this.plugin.saveSettings();
+        })
+      );
+    }
   }
 };
 
 // src/turnContextSummary.ts
-var CONTEXT_LIMITS = {
-  maxFilesInMessage: 8,
-  maxFoldersInMessage: 4,
-  maxTagsInMessage: 6,
-  maxExpandedPaths: 32,
-  maxFilesPerFolder: 20,
-  maxFilesPerTag: 20,
-  maxCharsPerFile: 5e4,
-  maxCharsTotal: 18e4
-};
 function summarizeTurnContext(input) {
+  const limits = mergeContextLimits(input.limits);
   const selection = parseContextSelection(input.draftMessage, {
-    files: CONTEXT_LIMITS.maxFilesInMessage,
-    folders: CONTEXT_LIMITS.maxFoldersInMessage,
-    tags: CONTEXT_LIMITS.maxTagsInMessage
+    files: limits.maxFilesInMessage,
+    folders: limits.maxFoldersInMessage,
+    tags: limits.maxTagsInMessage
   });
   const rawFiles = countRawMentions(input.draftMessage, /@\[\[([^\]]+)\]\]/g);
   const rawFolders = countRawMentions(input.draftMessage, /@\{([^}]+)\}/g);
   const rawTags = countRawMentions(input.draftMessage, /(?:^|\s)#([\p{L}\p{N}_/-]+)/gu);
   const mentionCapped = rawFiles > selection.filePaths.length || rawFolders > selection.folderPaths.length || rawTags > selection.tags.length;
-  const truncated = Boolean(input.expansionCapped) || Boolean(input.contentTruncated) || mentionCapped || input.expandedPathCount >= CONTEXT_LIMITS.maxExpandedPaths;
+  const truncated = Boolean(input.expansionCapped) || Boolean(input.contentTruncated) || mentionCapped || input.expandedPathCount >= limits.maxExpandedPaths;
   const activeNoteLabel = input.includeActiveNote && input.activeNotePath ? basename(input.activeNotePath) : input.includeActiveNote ? null : void 0;
   const parts = [];
   if (input.includeActiveNote) {
@@ -21024,8 +21890,11 @@ function summarizeTurnContext(input) {
     parts.push(`\u6807\u7B7E ${selection.tags.length}`);
   if (input.attachmentCount > 0)
     parts.push(`\u56FE ${input.attachmentCount}`);
+  if (input.selectionChars && input.selectionChars > 0) {
+    parts.push(`\u9009\u533A ${input.selectionChars}`);
+  }
   if (input.expandedPathCount > 0) {
-    parts.push(`\u5C55\u5F00 ${input.expandedPathCount}/${CONTEXT_LIMITS.maxExpandedPaths}`);
+    parts.push(`\u5C55\u5F00 ${input.expandedPathCount}/${limits.maxExpandedPaths}`);
   }
   if (truncated)
     parts.push("\u5DF2\u622A\u65AD");
@@ -21040,24 +21909,25 @@ function summarizeTurnContext(input) {
     line: parts.length ? parts.join(" \xB7 ") : "\u672C\u8F6E\u65E0\u989D\u5916\u4E0A\u4E0B\u6587"
   };
 }
-function estimateExpansionCap(selection, folderHits, tagHits) {
+function estimateExpansionCap(selection, folderHits, tagHits, limitsInput) {
+  const limits = mergeContextLimits(limitsInput);
   let count = selection.filePaths.length;
   let capped = false;
   for (const hits of folderHits) {
-    const taken = Math.min(hits, CONTEXT_LIMITS.maxFilesPerFolder);
-    if (hits > CONTEXT_LIMITS.maxFilesPerFolder)
+    const taken = Math.min(hits, limits.maxFilesPerFolder);
+    if (hits > limits.maxFilesPerFolder)
       capped = true;
     count += taken;
   }
   for (const hits of tagHits) {
-    const taken = Math.min(hits, CONTEXT_LIMITS.maxFilesPerTag);
-    if (hits > CONTEXT_LIMITS.maxFilesPerTag)
+    const taken = Math.min(hits, limits.maxFilesPerTag);
+    if (hits > limits.maxFilesPerTag)
       capped = true;
     count += taken;
   }
-  if (count > CONTEXT_LIMITS.maxExpandedPaths) {
+  if (count > limits.maxExpandedPaths) {
     capped = true;
-    count = CONTEXT_LIMITS.maxExpandedPaths;
+    count = limits.maxExpandedPaths;
   }
   return { expandedPathCount: count, expansionCapped: capped };
 }
@@ -21066,6 +21936,156 @@ function basename(path2) {
   return name.replace(/\.md$/i, "") || name;
 }
 function countRawMentions(message, pattern) {
+  return Array.from(message.matchAll(pattern)).length;
+}
+
+// src/contextInventory.ts
+function buildContextInventory(input) {
+  const limits = mergeContextLimits(input.limits ?? DEFAULT_CONTEXT_LIMITS);
+  const selection = parseContextSelection(input.draftMessage, {
+    files: limits.maxFilesInMessage,
+    folders: limits.maxFoldersInMessage,
+    tags: limits.maxTagsInMessage
+  });
+  const rawFiles = countRawMentions2(input.draftMessage, /@\[\[([^\]]+)\]\]/g);
+  const rawFolders = countRawMentions2(input.draftMessage, /@\{([^}]+)\}/g);
+  const rawTags = countRawMentions2(input.draftMessage, /(?:^|\s)#([\p{L}\p{N}_/-]+)/gu);
+  const items = [];
+  let truncated = Boolean(input.expansionCapped) || Boolean(input.contentTruncated);
+  const truncationReasons = [];
+  if (input.includeActiveNote) {
+    if (input.activeNotePath) {
+      items.push({
+        kind: "active-note",
+        path: input.activeNotePath,
+        label: basename2(input.activeNotePath),
+        detail: "\u6D3B\u52A8\u7B14\u8BB0",
+        token: input.activeNotePath,
+        removable: true
+      });
+    } else {
+      items.push({
+        kind: "active-note",
+        path: "",
+        label: "\uFF08\u65E0\u6D3B\u52A8\u7B14\u8BB0\uFF09",
+        detail: "\u5DF2\u5F00\u542F\u4F46\u672A\u8BB0\u5F55\u8DEF\u5F84",
+        truncated: true
+      });
+      truncated = true;
+      truncationReasons.push("\u5F53\u524D\u5DF2\u5F00\u542F\u6D3B\u52A8\u7B14\u8BB0\uFF0C\u4F46\u672A\u8BB0\u5F55\u53EF\u53D1\u9001\u7684\u7B14\u8BB0\u8DEF\u5F84");
+    }
+  }
+  for (const path2 of input.openTabPaths ?? []) {
+    if (path2 && path2 !== input.activeNotePath) {
+      items.push({
+        kind: "open-tab",
+        path: path2,
+        label: basename2(path2),
+        detail: "\u6253\u5F00\u6807\u7B7E",
+        token: path2,
+        removable: true
+      });
+    }
+  }
+  if (input.selectionChars && input.selectionChars > 0) {
+    items.push({
+      kind: "selection",
+      path: input.activeNotePath ?? "",
+      label: `\u9009\u533A \xB7 ${input.selectionChars} \u5B57`,
+      detail: "\u7F16\u8F91\u5668\u9009\u4E2D\u6587\u672C",
+      token: "__selection__",
+      removable: false
+    });
+  }
+  for (const path2 of selection.filePaths) {
+    items.push({
+      kind: "file",
+      path: path2,
+      label: basename2(path2),
+      detail: "\u63D0\u53CA\u6587\u4EF6",
+      token: `@[[${path2}]]`,
+      removable: true
+    });
+  }
+  for (const path2 of selection.folderPaths) {
+    items.push({
+      kind: "folder",
+      path: path2,
+      label: path2.split("/").pop() ?? path2,
+      detail: `\u6587\u4EF6\u5939\uFF08\u6700\u591A ${limits.maxFilesPerFolder} \u4E2A\u6587\u4EF6\uFF09`,
+      truncated: input.expansionCapped,
+      token: `@{${path2}}`,
+      removable: true
+    });
+  }
+  for (const tag of selection.tags) {
+    items.push({
+      kind: "tag",
+      path: `#${tag}`,
+      label: `#${tag}`,
+      detail: `\u6807\u7B7E\uFF08\u6700\u591A ${limits.maxFilesPerTag} \u4E2A\u6587\u4EF6\uFF09`,
+      truncated: input.expansionCapped,
+      token: `#${tag}`,
+      removable: true
+    });
+  }
+  if (input.attachmentCount > 0) {
+    items.push({
+      kind: "image",
+      path: "",
+      label: `\u56FE\u7247 \xD7 ${input.attachmentCount}`,
+      detail: "\u5F85\u53D1\u9001\u9644\u4EF6",
+      token: "__attachments__",
+      removable: true
+    });
+  }
+  const expanded = input.expandedPaths ?? [];
+  if (expanded.length > 0) {
+    const shown = expanded.slice(0, limits.maxExpandedPaths);
+    if (expanded.length > limits.maxExpandedPaths || input.expansionCapped) {
+      truncated = true;
+      if (input.expansionCapped) {
+        truncationReasons.push(
+          `\u5C55\u5F00\u8DEF\u5F84\u8FBE\u5230\u4E0A\u9650\uFF1A\u6700\u591A ${limits.maxExpandedPaths} \u6761\uFF0C\u6587\u4EF6\u5939\u6700\u591A ${limits.maxFilesPerFolder} \u4E2A\u6587\u4EF6\uFF0C\u6807\u7B7E\u6700\u591A ${limits.maxFilesPerTag} \u4E2A\u6587\u4EF6`
+        );
+      }
+    }
+    items.push({
+      kind: "expanded",
+      path: "",
+      label: `\u5C55\u5F00\u8DEF\u5F84 ${shown.length}/${limits.maxExpandedPaths}`,
+      detail: input.contentTruncated ? "\u90E8\u5206\u6B63\u6587\u5C06\u88AB\u622A\u65AD" : "\u5C06\u8BFB\u5165\u7684 Vault \u8DEF\u5F84",
+      truncated
+    });
+  }
+  const selectionLimitsHit = rawFiles > selection.filePaths.length || rawFolders > selection.folderPaths.length || rawTags > selection.tags.length;
+  if (selectionLimitsHit) {
+    truncationReasons.push(
+      `\u6D88\u606F\u5185\u63D0\u53CA\u8FBE\u5230\u4E0A\u9650\uFF1A\u6587\u4EF6 ${limits.maxFilesInMessage}\u3001\u6587\u4EF6\u5939 ${limits.maxFoldersInMessage}\u3001\u6807\u7B7E ${limits.maxTagsInMessage}`
+    );
+  }
+  if (input.contentTruncated) {
+    truncationReasons.push(
+      `\u6587\u4EF6\u6B63\u6587\u8FBE\u5230\u4E0A\u9650\uFF1A\u5355\u6587\u4EF6 ${limits.maxCharsPerFile} \u5B57\uFF0C\u603B\u8BA1 ${limits.maxCharsTotal} \u5B57`
+    );
+  }
+  const lineParts = items.filter((i) => i.kind !== "expanded").map((i) => i.label).slice(0, 6);
+  if (items.length > 6)
+    lineParts.push(`+${items.length - 6}`);
+  if (truncated)
+    lineParts.push("\u5DF2\u622A\u65AD");
+  return {
+    items,
+    truncated,
+    line: lineParts.length ? lineParts.join(" \xB7 ") : "\u672C\u8F6E\u65E0\u989D\u5916\u4E0A\u4E0B\u6587",
+    truncationReasons: Array.from(new Set(truncationReasons))
+  };
+}
+function basename2(path2) {
+  const name = path2.split("/").pop() ?? path2;
+  return name.replace(/\.md$/i, "") || name;
+}
+function countRawMentions2(message, pattern) {
   return Array.from(message.matchAll(pattern)).length;
 }
 
@@ -21109,7 +22129,7 @@ function isDesktop() {
 function escapeXml(value) {
   return value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&apos;");
 }
-var GrokBuildPlugin = class extends import_obsidian6.Plugin {
+var GrokBuildPlugin = class extends import_obsidian8.Plugin {
   constructor() {
     super(...arguments);
     this.settings = DEFAULT_SETTINGS;
@@ -21121,6 +22141,7 @@ var GrokBuildPlugin = class extends import_obsidian6.Plugin {
     this.sendInFlight = false;
     this.saveTimer = null;
     this.detectedDefaultModel = null;
+    this.lastApplyUndo = null;
     /** Last focused Markdown file path — used when Grok panel has focus. */
     this.lastMarkdownPath = null;
   }
@@ -21156,15 +22177,30 @@ var GrokBuildPlugin = class extends import_obsidian6.Plugin {
       id: "grok-cleanup-screenshots",
       name: "Grok Obsidian: clean up orphan screenshots",
       callback: () => void this.cleanupOrphanScreenshots().then((count) => {
-        new import_obsidian6.Notice(count > 0 ? `\u5DF2\u6E05\u7406 ${count} \u4E2A\u5B64\u7ACB\u622A\u56FE` : "\u6CA1\u6709\u53EF\u6E05\u7406\u7684\u5B64\u7ACB\u622A\u56FE");
+        new import_obsidian8.Notice(count > 0 ? `\u5DF2\u6E05\u7406 ${count} \u4E2A\u5B64\u7ACB\u622A\u56FE` : "\u6CA1\u6709\u53EF\u6E05\u7406\u7684\u5B64\u7ACB\u622A\u56FE");
       })
+    });
+    this.addCommand({
+      id: "grok-send-editor-selection",
+      name: "Grok Obsidian: send editor selection",
+      editorCallback: (editor, view) => {
+        const selection = editor.getSelection().trim();
+        if (!selection) {
+          new import_obsidian8.Notice("\u8BF7\u5148\u5728\u7F16\u8F91\u5668\u4E2D\u9009\u62E9\u6587\u672C");
+          return;
+        }
+        this.captureMarkdownFocus(view.file?.path);
+        void this.activatePetView().then(() => {
+          this.getPetView()?.setComposerText(selection);
+        });
+      }
     });
     this.addSettingTab(new GrokBuildSettingTab(this.app, this));
     void this.refreshDefaultModel();
-    this.captureMarkdownFocus(this.app.workspace.getActiveViewOfType(import_obsidian6.MarkdownView)?.file?.path);
+    this.captureMarkdownFocus(this.app.workspace.getActiveViewOfType(import_obsidian8.MarkdownView)?.file?.path);
     this.registerEvent(
       this.app.workspace.on("active-leaf-change", () => {
-        const md = this.app.workspace.getActiveViewOfType(import_obsidian6.MarkdownView);
+        const md = this.app.workspace.getActiveViewOfType(import_obsidian8.MarkdownView);
         if (md?.file)
           this.captureMarkdownFocus(md.file.path);
         this.refreshContextUi();
@@ -21172,14 +22208,29 @@ var GrokBuildPlugin = class extends import_obsidian6.Plugin {
     );
     this.registerEvent(
       this.app.workspace.on("file-open", (file2) => {
-        if (file2 instanceof import_obsidian6.TFile && file2.extension === "md") {
+        if (file2 instanceof import_obsidian8.TFile && file2.extension === "md") {
           this.captureMarkdownFocus(file2.path);
           this.refreshContextUi();
         }
       })
     );
+    this.registerEvent(
+      this.app.workspace.on("editor-menu", (menu, editor, view) => {
+        const selection = editor.getSelection().trim();
+        if (!selection)
+          return;
+        menu.addItem(
+          (item) => item.setTitle("\u53D1\u9001\u9009\u533A\u5230 Grok Obsidian").setIcon("message-circle").onClick(() => {
+            this.captureMarkdownFocus(view.file?.path);
+            void this.activatePetView().then(() => {
+              this.getPetView()?.setComposerText(selection);
+            });
+          })
+        );
+      })
+    );
     if (!isDesktop())
-      new import_obsidian6.Notice("Grok Obsidian \u4EC5\u652F\u6301\u684C\u9762\u7AEF\uFF08\u9700\u8981\u672C\u673A Grok CLI\uFF09");
+      new import_obsidian8.Notice("Grok Obsidian \u4EC5\u652F\u6301\u684C\u9762\u7AEF\uFF08\u9700\u8981\u672C\u673A Grok CLI\uFF09");
   }
   onunload() {
     this.runner.cancel();
@@ -21204,6 +22255,7 @@ var GrokBuildPlugin = class extends import_obsidian6.Plugin {
     if (typeof this.settings.idleTimeoutMs !== "number" || !Number.isFinite(this.settings.idleTimeoutMs) || this.settings.idleTimeoutMs < 5e3) {
       this.settings.idleTimeoutMs = DEFAULT_SETTINGS.idleTimeoutMs;
     }
+    this.settings.contextLimits = mergeContextLimits(this.settings.contextLimits);
     this.chatStore = new ChatStore(
       stored?.chatState,
       this.settings.historyLimit,
@@ -21227,19 +22279,45 @@ var GrokBuildPlugin = class extends import_obsidian6.Plugin {
   get displayModel() {
     return this.detectedDefaultModel || "CLI \u9ED8\u8BA4\u6A21\u578B";
   }
+  get contextLimits() {
+    return mergeContextLimits(this.settings.contextLimits);
+  }
+  async refreshDefaultModelPublic() {
+    await this.refreshDefaultModel();
+    this.refreshContextUi();
+  }
+  async testGrokCliPublic() {
+    const notice = new import_obsidian8.Notice("\u6B63\u5728\u6D4B\u8BD5 grok CLI\u2026", 0);
+    const result = await testGrokCli(this.settings);
+    notice.hide();
+    new import_obsidian8.Notice(result.message, result.ok ? 5e3 : 9e3);
+    await this.refreshDefaultModelPublic();
+  }
+  openPluginSettings() {
+    const setting = this.app.setting;
+    if (setting?.open) {
+      setting.open();
+      setting.openTabById?.(this.manifest.id);
+      return;
+    }
+    new import_obsidian8.Notice("\u8BF7\u6253\u5F00 Obsidian \u8BBE\u7F6E \u2192 \u793E\u533A\u63D2\u4EF6 \u2192 Grok Obsidian");
+  }
   async refreshDefaultModel() {
     const resolution = resolveGrokBinary(this.settings);
     if (!resolution.found) {
       this.detectedDefaultModel = null;
       this.getPetView()?.setModel("\u672A\u68C0\u6D4B\u5230 grok \xB7 \u8BF7\u5B89\u88C5\u5E76\u767B\u5F55 CLI");
+      this.getPetView()?.setCliStatus(false, "\u672A\u68C0\u6D4B\u5230 grok\u3002\u8BF7\u5B89\u88C5 CLI\u3001\u6267\u884C grok login\uFF0C\u6216\u5728\u8BBE\u7F6E\u4E2D\u586B\u5199\u53EF\u6267\u884C\u6587\u4EF6\u8DEF\u5F84\u3002");
       return;
     }
     this.detectedDefaultModel = await detectDefaultGrokModel(this.settings);
     if (!this.detectedDefaultModel) {
       this.getPetView()?.setModel("\u5DF2\u627E\u5230 CLI \xB7 \u672A\u80FD\u8BFB\u53D6\u9ED8\u8BA4\u6A21\u578B\uFF08\u53EF\u5C1D\u8BD5 grok login\uFF09");
+      this.getPetView()?.setCliStatus(true, null);
       return;
     }
     this.getPetView()?.setModel(this.displayModel);
+    this.getPetView()?.setCliStatus(true, null);
   }
   schedulePersist() {
     if (this.saveTimer !== null)
@@ -21254,7 +22332,7 @@ var GrokBuildPlugin = class extends import_obsidian6.Plugin {
       this.lastMarkdownPath = path2;
   }
   resolvedActiveNotePath() {
-    const currentMarkdownPath = this.app.workspace.getActiveViewOfType(import_obsidian6.MarkdownView)?.file?.path ?? null;
+    const currentMarkdownPath = this.app.workspace.getActiveViewOfType(import_obsidian8.MarkdownView)?.file?.path ?? null;
     return resolveActiveNotePath({
       includeActiveNote: this.chatStore.current.includeActiveNote,
       currentMarkdownPath,
@@ -21266,10 +22344,13 @@ var GrokBuildPlugin = class extends import_obsidian6.Plugin {
     if (!view)
       return;
     const activePath = this.resolvedActiveNotePath();
+    const activeView = this.app.workspace.getActiveViewOfType(import_obsidian8.MarkdownView);
+    const selectionText = this.chatStore.current.includeActiveNote && activeView?.file?.path === activePath ? activeView.editor.getSelection().trim() : "";
     view.setActiveNotePath(activePath);
     view.setActiveNoteChipLabel(
       this.chatStore.current.includeActiveNote ? activeNoteChipLabel(activePath) : "\u5F53\u524D\u7B14\u8BB0"
     );
+    view.setSelectionChars(selectionText.length || null);
     const openPaths = this.getOpenMarkdownPaths();
     const selected = this.chatStore.current.openTabPaths ?? [];
     const stillOpen = selected.filter((path2) => openPaths.includes(path2));
@@ -21284,14 +22365,33 @@ var GrokBuildPlugin = class extends import_obsidian6.Plugin {
       }))
     );
     const draft = view.getComposerText();
-    const summary = this.estimateDraftContext(draft, this.pendingAttachments.length);
+    const summary = this.estimateDraftContext(draft, this.pendingAttachments.length, selectionText.length);
     view.setTurnContextSummary(summary.line, summary.truncated);
+    const selection = parseContextSelection(draft, {
+      files: this.contextLimits.maxFilesInMessage,
+      folders: this.contextLimits.maxFoldersInMessage,
+      tags: this.contextLimits.maxTagsInMessage
+    });
+    const expanded = this.expandContextFiles(selection);
+    view.setContextInventory(
+      buildContextInventory({
+        includeActiveNote: this.chatStore.current.includeActiveNote,
+        activeNotePath: activePath,
+        openTabPaths: stillOpen,
+        draftMessage: draft,
+        attachmentCount: this.pendingAttachments.length,
+        expandedPaths: expanded.paths,
+        expansionCapped: expanded.expansionCapped,
+        selectionChars: selectionText.length,
+        limits: this.contextLimits
+      })
+    );
   }
   toggleOpenTab(path2, selected) {
     const current = new Set(this.chatStore.current.openTabPaths ?? []);
     if (selected) {
       if (current.size >= 3 && !current.has(path2)) {
-        new import_obsidian6.Notice("\u6700\u591A\u9009\u62E9 3 \u4E2A\u6253\u5F00\u4E2D\u7684\u6807\u7B7E\u4F5C\u4E3A\u4E0A\u4E0B\u6587");
+        new import_obsidian8.Notice("\u6700\u591A\u9009\u62E9 3 \u4E2A\u6253\u5F00\u4E2D\u7684\u6807\u7B7E\u4F5C\u4E3A\u4E0A\u4E0B\u6587");
         this.refreshContextUi();
         return;
       }
@@ -21316,17 +22416,29 @@ var GrokBuildPlugin = class extends import_obsidian6.Plugin {
       onDropContext: (paths) => view.insertContextPaths(paths),
       onRemoveAttachment: (id) => void this.removePendingAttachment(id),
       onToggleActiveNote: (value) => this.setIncludeActiveNote(value),
+      onOpenContextInventory: () => this.openContextInventory(),
+      onRefreshCli: () => this.refreshDefaultModelPublic(),
+      onOpenSettings: () => this.openPluginSettings(),
+      onTestCli: () => this.testGrokCliPublic(),
+      onUndoLastApply: () => this.undoLastApply(),
       onCopyMessage: (message) => void this.copyMessage(message),
       onEditMessage: (message) => this.editMessage(message),
       onRegenerateMessage: (message) => void this.regenerateMessage(message),
       onRetryMessage: (message) => void this.retryMessage(message),
       onApplyMessage: (message) => this.previewApply(message),
+      onWriteBackMessage: (action, text) => void this.writeBackResponse(action, text),
       onOpenSource: (path2) => void this.openSource(path2),
       onDraftContextChange: () => this.refreshContextUi(),
       onToggleOpenTab: (path2, selected) => this.toggleOpenTab(path2, selected)
     });
     view.setConversation(this.chatStore.current.messages, this.chatStore.current.includeActiveNote);
     view.setPendingAttachments(this.pendingAttachments);
+    view.setPendingUndoAvailable(isUndoEntryValid(this.lastApplyUndo));
+    const resolution = resolveGrokBinary(this.settings);
+    view.setCliStatus(
+      resolution.found,
+      resolution.found ? null : "\u672A\u68C0\u6D4B\u5230 grok\u3002\u8BF7\u5B89\u88C5 CLI\u3001\u6267\u884C grok login\uFF0C\u6216\u5728\u8BBE\u7F6E\u4E2D\u586B\u5199\u53EF\u6267\u884C\u6587\u4EF6\u8DEF\u5F84\u3002"
+    );
     this.refreshContextUi();
   }
   async activatePetView() {
@@ -21360,12 +22472,12 @@ var GrokBuildPlugin = class extends import_obsidian6.Plugin {
   }
   cancelRun() {
     if (!this.isRunning) {
-      new import_obsidian6.Notice("\u6CA1\u6709\u6B63\u5728\u8FD0\u884C\u7684 Grok \u4EFB\u52A1");
+      new import_obsidian8.Notice("\u6CA1\u6709\u6B63\u5728\u8FD0\u884C\u7684 Grok \u4EFB\u52A1");
       return;
     }
     this.runner.cancel();
     this.acpRunner.cancel();
-    new import_obsidian6.Notice("\u6B63\u5728\u505C\u6B62\u2026\u5DF2\u751F\u6210\u5185\u5BB9\u5C06\u4FDD\u7559");
+    new import_obsidian8.Notice("\u6B63\u5728\u505C\u6B62\u2026\u5DF2\u751F\u6210\u5185\u5BB9\u5C06\u4FDD\u7559");
   }
   applyProgress(event) {
     this.getPetView()?.update({
@@ -21392,7 +22504,7 @@ var GrokBuildPlugin = class extends import_obsidian6.Plugin {
     const seen = /* @__PURE__ */ new Set();
     this.app.workspace.iterateAllLeaves((leaf) => {
       const view = leaf.view;
-      if (view instanceof import_obsidian6.MarkdownView && view.file) {
+      if (view instanceof import_obsidian8.MarkdownView && view.file) {
         const path2 = view.file.path;
         if (!seen.has(path2)) {
           seen.add(path2);
@@ -21401,6 +22513,33 @@ var GrokBuildPlugin = class extends import_obsidian6.Plugin {
       }
     });
     return paths;
+  }
+  findMarkdownView(path2) {
+    const activeView = this.app.workspace.getActiveViewOfType(import_obsidian8.MarkdownView);
+    if (activeView?.file && (!path2 || activeView.file.path === path2))
+      return activeView;
+    let found = null;
+    this.app.workspace.iterateAllLeaves((leaf) => {
+      if (found)
+        return;
+      const view = leaf.view;
+      if (view instanceof import_obsidian8.MarkdownView && view.file && (!path2 || view.file.path === path2)) {
+        found = view;
+      }
+    });
+    return found;
+  }
+  getWriteBackTarget() {
+    const targetPath = this.resolvedActiveNotePath() ?? this.lastMarkdownPath;
+    const view = this.findMarkdownView(targetPath) ?? this.findMarkdownView(null);
+    if (view?.file)
+      return { view, file: view.file };
+    const fallbackPath = targetPath ?? this.app.workspace.getActiveFile()?.path ?? null;
+    const abstract = fallbackPath ? this.app.vault.getAbstractFileByPath(fallbackPath) : null;
+    return {
+      view: null,
+      file: abstract instanceof import_obsidian8.TFile && abstract.extension === "md" ? abstract : null
+    };
   }
   getFilesForTag(tag) {
     return this.app.vault.getMarkdownFiles().filter((file2) => {
@@ -21429,25 +22568,25 @@ var GrokBuildPlugin = class extends import_obsidian6.Plugin {
         (file2) => file2.path.startsWith(`${folder}/`) && TEXT_CONTEXT_EXTENSIONS.has(file2.extension.toLowerCase())
       );
       folderHits.push(matches.length);
-      if (matches.length > CONTEXT_LIMITS.maxFilesPerFolder)
+      if (matches.length > this.contextLimits.maxFilesPerFolder)
         expansionCapped = true;
-      matches.slice(0, CONTEXT_LIMITS.maxFilesPerFolder).forEach((file2) => paths.add(file2.path));
+      matches.slice(0, this.contextLimits.maxFilesPerFolder).forEach((file2) => paths.add(file2.path));
     }
     for (const tag of selection.tags) {
       sources.push({ path: `#${tag}`, label: `#${tag}`, kind: "tag" });
       const matches = this.getFilesForTag(tag);
       tagHits.push(matches.length);
-      if (matches.length > CONTEXT_LIMITS.maxFilesPerTag)
+      if (matches.length > this.contextLimits.maxFilesPerTag)
         expansionCapped = true;
-      matches.slice(0, CONTEXT_LIMITS.maxFilesPerTag).forEach((file2) => paths.add(file2.path));
+      matches.slice(0, this.contextLimits.maxFilesPerTag).forEach((file2) => paths.add(file2.path));
     }
     const all = Array.from(paths);
-    if (all.length > CONTEXT_LIMITS.maxExpandedPaths)
+    if (all.length > this.contextLimits.maxExpandedPaths)
       expansionCapped = true;
-    const estimate = estimateExpansionCap(selection, folderHits, tagHits);
+    const estimate = estimateExpansionCap(selection, folderHits, tagHits, this.contextLimits);
     expansionCapped = expansionCapped || estimate.expansionCapped;
     return {
-      paths: all.slice(0, CONTEXT_LIMITS.maxExpandedPaths),
+      paths: all.slice(0, this.contextLimits.maxExpandedPaths),
       sources,
       expansionCapped
     };
@@ -21458,7 +22597,7 @@ var GrokBuildPlugin = class extends import_obsidian6.Plugin {
     let contentTruncated = false;
     for (const path2 of paths) {
       const file2 = this.app.vault.getAbstractFileByPath(path2);
-      if (!(file2 instanceof import_obsidian6.TFile)) {
+      if (!(file2 instanceof import_obsidian8.TFile)) {
         blocks.push(
           `<referenced_file_error><path>${escapeXml(path2)}</path><error>File not found</error></referenced_file_error>`
         );
@@ -21469,8 +22608,8 @@ var GrokBuildPlugin = class extends import_obsidian6.Plugin {
       try {
         const content = await this.app.vault.cachedRead(file2);
         const allowed = Math.min(
-          CONTEXT_LIMITS.maxCharsPerFile,
-          Math.max(0, CONTEXT_LIMITS.maxCharsTotal - total)
+          this.contextLimits.maxCharsPerFile,
+          Math.max(0, this.contextLimits.maxCharsTotal - total)
         );
         const included = content.slice(0, allowed);
         total += included.length;
@@ -21503,12 +22642,12 @@ var GrokBuildPlugin = class extends import_obsidian6.Plugin {
   }
   async buildChatPrompt(message, attachments, includeHistory) {
     const selection = parseContextSelection(message, {
-      files: CONTEXT_LIMITS.maxFilesInMessage,
-      folders: CONTEXT_LIMITS.maxFoldersInMessage,
-      tags: CONTEXT_LIMITS.maxTagsInMessage
+      files: this.contextLimits.maxFilesInMessage,
+      folders: this.contextLimits.maxFoldersInMessage,
+      tags: this.contextLimits.maxTagsInMessage
     });
     const expanded = this.expandContextFiles(selection);
-    const activeView = this.app.workspace.getActiveViewOfType(import_obsidian6.MarkdownView);
+    const activeView = this.app.workspace.getActiveViewOfType(import_obsidian8.MarkdownView);
     const activeNotePath = resolveActiveNotePath({
       includeActiveNote: this.chatStore.current.includeActiveNote,
       currentMarkdownPath: activeView?.file?.path ?? null,
@@ -21581,12 +22720,12 @@ var GrokBuildPlugin = class extends import_obsidian6.Plugin {
     if (!isDesktop())
       return null;
     if (this.isRunning) {
-      new import_obsidian6.Notice("\u5DF2\u6709\u4EFB\u52A1\u5728\u8FD0\u884C\uFF0C\u8BF7\u5148\u505C\u6B62\u6216\u7B49\u5F85\u5B8C\u6210");
+      new import_obsidian8.Notice("\u5DF2\u6709\u4EFB\u52A1\u5728\u8FD0\u884C\uFF0C\u8BF7\u5148\u505C\u6B62\u6216\u7B49\u5F85\u5B8C\u6210");
       return null;
     }
     const cwd = this.getVaultPath();
     if (!cwd) {
-      new import_obsidian6.Notice("\u65E0\u6CD5\u83B7\u53D6 Vault \u7EDD\u5BF9\u8DEF\u5F84");
+      new import_obsidian8.Notice("\u65E0\u6CD5\u83B7\u53D6 Vault \u7EDD\u5BF9\u8DEF\u5F84");
       return null;
     }
     await this.activatePetView();
@@ -21661,7 +22800,7 @@ var GrokBuildPlugin = class extends import_obsidian6.Plugin {
       this.streamingMessageId = assistant.id;
       this.schedulePersist();
       if (!resolveGrokBinary(this.settings).found) {
-        new import_obsidian6.Notice("\u672A\u68C0\u6D4B\u5230 grok\uFF0C\u8BF7\u5B89\u88C5 CLI \u6216\u5728\u9AD8\u7EA7\u8BBE\u7F6E\u4E2D\u586B\u5199\u8DEF\u5F84\uFF0C\u5E76\u786E\u8BA4\u5DF2\u767B\u5F55");
+        new import_obsidian8.Notice("\u672A\u68C0\u6D4B\u5230 grok\uFF0C\u8BF7\u5B89\u88C5 CLI \u6216\u5728\u9AD8\u7EA7\u8BBE\u7F6E\u4E2D\u586B\u5199\u8DEF\u5F84\uFF0C\u5E76\u786E\u8BA4\u5DF2\u767B\u5F55");
       }
       const result = await this.executePrompt(built.prompt, attachments);
       this.chatStore.setLastTurnUsedAcp(usedAcp);
@@ -21733,9 +22872,9 @@ var GrokBuildPlugin = class extends import_obsidian6.Plugin {
       this.pendingAttachments = [...this.pendingAttachments, ...saved].slice(0, 4);
       this.getPetView()?.setPendingAttachments(this.pendingAttachments);
       if (saved.length === 0)
-        new import_obsidian6.Notice("\u6CA1\u6709\u627E\u5230\u53EF\u7528\u56FE\u7247");
+        new import_obsidian8.Notice("\u6CA1\u6709\u627E\u5230\u53EF\u7528\u56FE\u7247");
     } catch (error51) {
-      new import_obsidian6.Notice(`\u56FE\u7247\u5904\u7406\u5931\u8D25\uFF1A${error51 instanceof Error ? error51.message : String(error51)}`);
+      new import_obsidian8.Notice(`\u56FE\u7247\u5904\u7406\u5931\u8D25\uFF1A${error51 instanceof Error ? error51.message : String(error51)}`);
     }
   }
   async addDroppedFiles(files) {
@@ -21744,9 +22883,9 @@ var GrokBuildPlugin = class extends import_obsidian6.Plugin {
       const paths = await saveDroppedFiles(this.app, files, activePath);
       this.getPetView()?.insertContextPaths(paths);
       if (paths.length === 0)
-        new import_obsidian6.Notice("\u6CA1\u6709\u53EF\u6DFB\u52A0\u7684\u6587\u4EF6");
+        new import_obsidian8.Notice("\u6CA1\u6709\u53EF\u6DFB\u52A0\u7684\u6587\u4EF6");
     } catch (error51) {
-      new import_obsidian6.Notice(`\u6587\u4EF6\u5904\u7406\u5931\u8D25\uFF1A${error51 instanceof Error ? error51.message : String(error51)}`);
+      new import_obsidian8.Notice(`\u6587\u4EF6\u5904\u7406\u5931\u8D25\uFF1A${error51 instanceof Error ? error51.message : String(error51)}`);
     }
   }
   async removePendingAttachment(id) {
@@ -21764,11 +22903,11 @@ var GrokBuildPlugin = class extends import_obsidian6.Plugin {
     this.schedulePersist();
   }
   /** Used by the pet view to estimate turn context without re-reading file bodies. */
-  estimateDraftContext(draftMessage, attachmentCount) {
+  estimateDraftContext(draftMessage, attachmentCount, selectionChars = 0) {
     const selection = parseContextSelection(draftMessage, {
-      files: CONTEXT_LIMITS.maxFilesInMessage,
-      folders: CONTEXT_LIMITS.maxFoldersInMessage,
-      tags: CONTEXT_LIMITS.maxTagsInMessage
+      files: this.contextLimits.maxFilesInMessage,
+      folders: this.contextLimits.maxFoldersInMessage,
+      tags: this.contextLimits.maxTagsInMessage
     });
     const expanded = this.expandContextFiles(selection);
     const activeNotePath = this.resolvedActiveNotePath();
@@ -21786,7 +22925,9 @@ var GrokBuildPlugin = class extends import_obsidian6.Plugin {
       draftMessage,
       attachmentCount,
       expandedPathCount,
-      expansionCapped: expanded.expansionCapped
+      expansionCapped: expanded.expansionCapped,
+      selectionChars,
+      limits: this.contextLimits
     });
     const tabCount = (this.chatStore.current.openTabPaths ?? []).length;
     if (tabCount > 0) {
@@ -21826,7 +22967,7 @@ var GrokBuildPlugin = class extends import_obsidian6.Plugin {
         this.getPetView()?.setPendingAttachments([]);
         this.refreshContextUi();
         await this.persistData();
-        new import_obsidian6.Notice("\u5BF9\u8BDD\u5DF2\u5220\u9664");
+        new import_obsidian8.Notice("\u5BF9\u8BDD\u5DF2\u5220\u9664");
       },
       (conversation, title) => {
         const ok = this.chatStore.rename(conversation.id, title);
@@ -21837,7 +22978,7 @@ var GrokBuildPlugin = class extends import_obsidian6.Plugin {
       async (conversation) => {
         const md = this.chatStore.exportMarkdown(conversation.id);
         if (!md) {
-          new import_obsidian6.Notice("\u5BFC\u51FA\u5931\u8D25");
+          new import_obsidian8.Notice("\u5BFC\u51FA\u5931\u8D25");
           return;
         }
         const safeTitle = (conversation.title || "\u5BF9\u8BDD").replace(/[\\/:*?"<>|]/g, "-").slice(0, 40);
@@ -21847,15 +22988,15 @@ var GrokBuildPlugin = class extends import_obsidian6.Plugin {
         );
         await this.app.vault.create(path2, md);
         const file2 = this.app.vault.getAbstractFileByPath(path2);
-        if (file2 instanceof import_obsidian6.TFile)
+        if (file2 instanceof import_obsidian8.TFile)
           await this.app.workspace.getLeaf("tab").openFile(file2);
-        new import_obsidian6.Notice(`\u5DF2\u5BFC\u51FA\uFF1A${path2}`);
+        new import_obsidian8.Notice(`\u5DF2\u5BFC\u51FA\uFF1A${path2}`);
       }
     ).open();
   }
   startNewChat() {
     if (this.isRunning) {
-      new import_obsidian6.Notice("\u8BF7\u5148\u505C\u6B62\u6216\u7B49\u5F85\u5F53\u524D\u4EFB\u52A1\u5B8C\u6210");
+      new import_obsidian8.Notice("\u8BF7\u5148\u505C\u6B62\u6216\u7B49\u5F85\u5F53\u524D\u4EFB\u52A1\u5B8C\u6210");
       return;
     }
     const conversation = this.chatStore.create(this.settings.includeActiveNoteByDefault);
@@ -21870,14 +23011,14 @@ var GrokBuildPlugin = class extends import_obsidian6.Plugin {
   async copyMessage(message) {
     try {
       await navigator.clipboard.writeText(message.text);
-      new import_obsidian6.Notice(message.role === "assistant" ? "\u56DE\u7B54\u5DF2\u590D\u5236" : "\u6D88\u606F\u5DF2\u590D\u5236");
+      new import_obsidian8.Notice(message.role === "assistant" ? "\u56DE\u7B54\u5DF2\u590D\u5236" : "\u6D88\u606F\u5DF2\u590D\u5236");
     } catch (error51) {
-      new import_obsidian6.Notice(`\u590D\u5236\u5931\u8D25\uFF1A${error51 instanceof Error ? error51.message : String(error51)}`);
+      new import_obsidian8.Notice(`\u590D\u5236\u5931\u8D25\uFF1A${error51 instanceof Error ? error51.message : String(error51)}`);
     }
   }
   editMessage(message) {
     if (this.isRunning || this.sendInFlight) {
-      new import_obsidian6.Notice("\u8BF7\u5148\u505C\u6B62\u6216\u7B49\u5F85\u5F53\u524D\u4EFB\u52A1\u5B8C\u6210");
+      new import_obsidian8.Notice("\u8BF7\u5148\u505C\u6B62\u6216\u7B49\u5F85\u5F53\u524D\u4EFB\u52A1\u5B8C\u6210");
       return;
     }
     if (message.role !== "user")
@@ -21914,7 +23055,7 @@ var GrokBuildPlugin = class extends import_obsidian6.Plugin {
   /** Retry a failed assistant turn with the same user text/attachments/context. */
   async retryMessage(message) {
     if (this.isRunning || this.sendInFlight) {
-      new import_obsidian6.Notice("\u8BF7\u5148\u505C\u6B62\u6216\u7B49\u5F85\u5F53\u524D\u4EFB\u52A1\u5B8C\u6210");
+      new import_obsidian8.Notice("\u8BF7\u5148\u505C\u6B62\u6216\u7B49\u5F85\u5F53\u524D\u4EFB\u52A1\u5B8C\u6210");
       return;
     }
     const text = message.retryUserText;
@@ -21933,12 +23074,172 @@ var GrokBuildPlugin = class extends import_obsidian6.Plugin {
   previewApply(message) {
     const active = this.app.workspace.getActiveFile();
     const fallbackPath = active && !active.path.includes("..") ? active.path : void 0;
-    new ApplyDiffModal(
+    new ApplyDiffModal(this.app, message.text, fallbackPath, (summary, undo) => {
+      const notice = new import_obsidian8.Notice(summary, 6e3);
+      if (undo && isUndoEntryValid(undo)) {
+        this.lastApplyUndo = undo;
+        this.getPetView()?.setPendingUndoAvailable(true);
+        const undoButton = notice.noticeEl.createEl("button", {
+          cls: "grok-undo-button",
+          text: "\u64A4\u9500",
+          attr: { type: "button" }
+        });
+        undoButton.addEventListener("click", () => void this.undoApply(undo));
+      }
+    }, (action, text) => this.writeBackResponse(action, text)).open();
+  }
+  async undoApply(entry) {
+    if (!isUndoEntryValid(entry)) {
+      this.lastApplyUndo = null;
+      this.getPetView()?.setPendingUndoAvailable(false);
+      new import_obsidian8.Notice("\u64A4\u9500\u5DF2\u8FC7\u671F");
+      return;
+    }
+    const actions = planUndoActions(entry);
+    for (const action of actions) {
+      const abstract = this.app.vault.getAbstractFileByPath(action.path);
+      if (action.action === "delete") {
+        if (abstract instanceof import_obsidian8.TFile) {
+          await this.app.vault.delete(abstract);
+        }
+      } else if (abstract instanceof import_obsidian8.TFile) {
+        await this.app.vault.modify(abstract, action.content);
+      } else {
+        await this.app.vault.create(action.path, action.content);
+      }
+    }
+    if (this.lastApplyUndo?.id === entry.id) {
+      this.lastApplyUndo = null;
+      this.getPetView()?.setPendingUndoAvailable(false);
+    }
+    new import_obsidian8.Notice("\u5DF2\u64A4\u9500\u6700\u8FD1\u4E00\u6B21\u5E94\u7528");
+  }
+  async undoLastApply() {
+    const entry = this.lastApplyUndo;
+    if (!entry || !isUndoEntryValid(entry)) {
+      this.lastApplyUndo = null;
+      this.getPetView()?.setPendingUndoAvailable(false);
+      new import_obsidian8.Notice("\u6CA1\u6709\u53EF\u64A4\u9500\u7684\u6700\u8FD1\u5E94\u7528");
+      return;
+    }
+    await this.undoApply(entry);
+  }
+  openContextInventory() {
+    const activePath = this.resolvedActiveNotePath();
+    const activeView = this.app.workspace.getActiveViewOfType(import_obsidian8.MarkdownView);
+    const selectionText = this.chatStore.current.includeActiveNote && activeView?.file?.path === activePath ? activeView.editor.getSelection().trim() : "";
+    const draft = this.getPetView()?.getComposerText() ?? "";
+    const selection = parseContextSelection(draft, {
+      files: this.contextLimits.maxFilesInMessage,
+      folders: this.contextLimits.maxFoldersInMessage,
+      tags: this.contextLimits.maxTagsInMessage
+    });
+    const expanded = this.expandContextFiles(selection);
+    new ContextInventoryModal(
       this.app,
-      message.text,
-      fallbackPath,
-      (summary) => new import_obsidian6.Notice(summary)
+      buildContextInventory({
+        includeActiveNote: this.chatStore.current.includeActiveNote,
+        activeNotePath: activePath,
+        openTabPaths: this.chatStore.current.openTabPaths ?? [],
+        draftMessage: draft,
+        attachmentCount: this.pendingAttachments.length,
+        expandedPaths: expanded.paths,
+        expansionCapped: expanded.expansionCapped,
+        selectionChars: selectionText.length,
+        limits: this.contextLimits
+      }),
+      (path2) => this.openSource(path2),
+      (item) => this.removeContextInventoryItem(item)
     ).open();
+  }
+  removeContextInventoryItem(item) {
+    const view = this.getPetView();
+    if (item.kind === "active-note") {
+      this.setIncludeActiveNote(false);
+      new import_obsidian8.Notice("\u5DF2\u5173\u95ED\u5F53\u524D\u7B14\u8BB0\u4E0A\u4E0B\u6587");
+      return;
+    }
+    if (item.kind === "open-tab" && item.path) {
+      this.toggleOpenTab(item.path, false);
+      new import_obsidian8.Notice("\u5DF2\u79FB\u9664\u6253\u5F00\u6807\u7B7E\u4E0A\u4E0B\u6587");
+      return;
+    }
+    if (item.kind === "image") {
+      this.pendingAttachments = [];
+      view?.setPendingAttachments([]);
+      this.refreshContextUi();
+      new import_obsidian8.Notice("\u5DF2\u79FB\u9664\u5F85\u53D1\u9001\u56FE\u7247");
+      return;
+    }
+    if (item.token && view) {
+      const draft = view.getComposerText();
+      const next = draft.replace(item.token, "").replace(/[ \t]{2,}/g, " ").replace(/\s+\n/g, "\n").trimStart();
+      view.setComposerText(next);
+      this.refreshContextUi();
+      new import_obsidian8.Notice("\u5DF2\u79FB\u9664\u6B64\u4E0A\u4E0B\u6587");
+    }
+  }
+  async writeBackResponse(action, text) {
+    const target = this.getWriteBackTarget();
+    const activeFile = target.file ?? this.app.workspace.getActiveFile();
+    if ((action === "insert" || action === "append") && activeFile) {
+      const ok = await new ConfirmModal(
+        this.app,
+        action === "insert" ? "\u63D2\u5165\u5230\u5F53\u524D\u7B14\u8BB0" : "\u8FFD\u52A0\u5230\u5F53\u524D\u7B14\u8BB0",
+        `\u5C06\u5199\u5165\uFF1A${activeFile.path}
+
+\u8BF7\u786E\u8BA4\u8981\u5199\u5165\u8FD9\u6BB5\u56DE\u7B54\u3002`,
+        action === "insert" ? "\u786E\u8BA4\u63D2\u5165" : "\u786E\u8BA4\u8FFD\u52A0",
+        "\u53D6\u6D88"
+      ).wait();
+      if (!ok)
+        return;
+    }
+    if (action === "insert") {
+      let editor = target.view?.editor ?? null;
+      if (!editor && target.file) {
+        await this.app.workspace.getLeaf("tab").openFile(target.file);
+        editor = this.findMarkdownView(target.file.path)?.editor ?? null;
+      }
+      if (!editor) {
+        new import_obsidian8.Notice("\u5F53\u524D\u6CA1\u6709\u53EF\u5199\u5165\u7684 Markdown \u7F16\u8F91\u5668");
+        return;
+      }
+      editor.replaceSelection(text);
+      new import_obsidian8.Notice("\u5DF2\u63D2\u5165\u5230\u5F53\u524D\u7B14\u8BB0");
+      return;
+    }
+    if (action === "append") {
+      const editor = target.view?.editor ?? null;
+      if (editor) {
+        const prefix2 = editor.getValue().trimEnd().length > 0 ? "\n\n" : "";
+        const lastLine = editor.lastLine();
+        const end = { line: lastLine, ch: editor.getLine(lastLine).length };
+        editor.replaceRange(`${prefix2}${text}`, end);
+        new import_obsidian8.Notice("\u5DF2\u8FFD\u52A0\u5230\u5F53\u524D\u7B14\u8BB0");
+        return;
+      }
+      if (!activeFile) {
+        new import_obsidian8.Notice("\u5F53\u524D\u6CA1\u6709\u53EF\u5199\u5165\u7684 Markdown \u6587\u4EF6");
+        return;
+      }
+      const current = await this.app.vault.read(activeFile);
+      const prefix = current.trimEnd().length > 0 ? "\n\n" : "";
+      await this.app.vault.modify(activeFile, `${current}${prefix}${text}`);
+      await this.app.workspace.getLeaf("tab").openFile(activeFile);
+      new import_obsidian8.Notice("\u5DF2\u8FFD\u52A0\u5230\u5F53\u524D\u7B14\u8BB0");
+      return;
+    }
+    const parent = activeFile?.parent?.path ?? target.view?.file?.parent?.path ?? "";
+    const stem = activeFile?.basename ? `${activeFile.basename} - Grok` : "Grok note";
+    const path2 = await this.app.fileManager.getAvailablePathForAttachment(
+      parent ? `${parent}/${stem}.md` : `${stem}.md`
+    );
+    await this.app.vault.create(path2, text);
+    const file2 = this.app.vault.getAbstractFileByPath(path2);
+    if (file2 instanceof import_obsidian8.TFile)
+      await this.app.workspace.getLeaf("tab").openFile(file2);
+    new import_obsidian8.Notice("\u5DF2\u65B0\u5EFA\u7B14\u8BB0");
   }
   async openSource(path2) {
     if (path2.startsWith("#")) {
@@ -21951,7 +23252,7 @@ var GrokBuildPlugin = class extends import_obsidian6.Plugin {
       return;
     }
     const abstract = this.app.vault.getAbstractFileByPath(path2);
-    if (abstract instanceof import_obsidian6.TFile) {
+    if (abstract instanceof import_obsidian8.TFile) {
       await this.app.workspace.getLeaf("tab").openFile(abstract);
       return;
     }
@@ -21965,7 +23266,7 @@ var GrokBuildPlugin = class extends import_obsidian6.Plugin {
   /** Delete plugin-managed screenshot files not referenced by any conversation. */
   async cleanupOrphanScreenshots() {
     if (!this.settings.deleteAttachmentsOnCleanup) {
-      new import_obsidian6.Notice("\u5DF2\u5173\u95ED\u300C\u6E05\u7406\u65F6\u5220\u9664\u622A\u56FE\u9644\u4EF6\u300D");
+      new import_obsidian8.Notice("\u5DF2\u5173\u95ED\u300C\u6E05\u7406\u65F6\u5220\u9664\u622A\u56FE\u9644\u4EF6\u300D");
       return 0;
     }
     const referenced = this.chatStore.allReferencedAttachmentPaths();

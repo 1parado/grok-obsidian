@@ -1,4 +1,4 @@
-import { MarkdownView, Notice, Plugin, TFile, WorkspaceLeaf } from "obsidian";
+import { Editor, MarkdownView, Menu, Notice, Plugin, TFile, WorkspaceLeaf } from "obsidian";
 import {
   attachmentToAcpImage,
   deleteVaultFiles,
@@ -23,11 +23,14 @@ import {
   detectDefaultGrokModel,
   GrokRunner,
   resolveGrokBinary,
+  testGrokCli,
   type GrokProgressEvent,
   type GrokRunResult,
 } from "./grokRunner";
 import { shouldInjectLocalHistory } from "./historyInjection";
 import { ChatHistoryModal } from "./historyModal";
+import { ContextInventoryModal } from "./contextInventoryModal";
+import { ConfirmModal } from "./confirmModal";
 import { GrokPetView, GROK_PET_VIEW_TYPE } from "./petView";
 import {
   DEFAULT_SETTINGS,
@@ -35,10 +38,13 @@ import {
   type GrokBuildSettings,
 } from "./settings";
 import {
-  CONTEXT_LIMITS,
+  DEFAULT_CONTEXT_LIMITS,
+  mergeContextLimits,
   estimateExpansionCap,
   summarizeTurnContext,
 } from "./turnContextSummary";
+import { buildContextInventory, type ContextInventoryItem } from "./contextInventory";
+import { isUndoEntryValid, planUndoActions, type ApplyUndoEntry } from "./applyUndo";
 
 const TEXT_CONTEXT_EXTENSIONS = new Set([
   "md", "txt", "json", "jsonc", "yaml", "yml", "toml", "csv", "tsv",
@@ -78,6 +84,7 @@ export default class GrokBuildPlugin extends Plugin {
   private sendInFlight = false;
   private saveTimer: number | null = null;
   private detectedDefaultModel: string | null = null;
+  private lastApplyUndo: ApplyUndoEntry | null = null;
   /** Last focused Markdown file path — used when Grok panel has focus. */
   private lastMarkdownPath: string | null = null;
 
@@ -120,6 +127,21 @@ export default class GrokBuildPlugin extends Plugin {
           new Notice(count > 0 ? `已清理 ${count} 个孤立截图` : "没有可清理的孤立截图");
         }),
     });
+    this.addCommand({
+      id: "grok-send-editor-selection",
+      name: "Grok Obsidian: send editor selection",
+      editorCallback: (editor: Editor, view: MarkdownView) => {
+        const selection = editor.getSelection().trim();
+        if (!selection) {
+          new Notice("请先在编辑器中选择文本");
+          return;
+        }
+        this.captureMarkdownFocus(view.file?.path);
+        void this.activatePetView().then(() => {
+          this.getPetView()?.setComposerText(selection);
+        });
+      },
+    });
     this.addSettingTab(new GrokBuildSettingTab(this.app, this));
     void this.refreshDefaultModel();
 
@@ -137,6 +159,23 @@ export default class GrokBuildPlugin extends Plugin {
           this.captureMarkdownFocus(file.path);
           this.refreshContextUi();
         }
+      }),
+    );
+    this.registerEvent(
+      this.app.workspace.on("editor-menu", (menu: Menu, editor: Editor, view: MarkdownView) => {
+        const selection = editor.getSelection().trim();
+        if (!selection) return;
+        menu.addItem((item) =>
+          item
+            .setTitle("发送选区到 Grok Obsidian")
+            .setIcon("message-circle")
+            .onClick(() => {
+              this.captureMarkdownFocus(view.file?.path);
+              void this.activatePetView().then(() => {
+                this.getPetView()?.setComposerText(selection);
+              });
+            }),
+        );
       }),
     );
 
@@ -174,6 +213,7 @@ export default class GrokBuildPlugin extends Plugin {
     ) {
       this.settings.idleTimeoutMs = DEFAULT_SETTINGS.idleTimeoutMs;
     }
+    this.settings.contextLimits = mergeContextLimits(this.settings.contextLimits);
     this.chatStore = new ChatStore(
       stored?.chatState,
       this.settings.historyLimit,
@@ -202,20 +242,53 @@ export default class GrokBuildPlugin extends Plugin {
     return this.detectedDefaultModel || "CLI 默认模型";
   }
 
+  private get contextLimits(): typeof DEFAULT_CONTEXT_LIMITS {
+    return mergeContextLimits(this.settings.contextLimits);
+  }
+
+  async refreshDefaultModelPublic(): Promise<void> {
+    await this.refreshDefaultModel();
+    this.refreshContextUi();
+  }
+
+  async testGrokCliPublic(): Promise<void> {
+    const notice = new Notice("正在测试 grok CLI…", 0);
+    const result = await testGrokCli(this.settings);
+    notice.hide();
+    new Notice(result.message, result.ok ? 5000 : 9000);
+    await this.refreshDefaultModelPublic();
+  }
+
+  openPluginSettings(): void {
+    // Obsidian exposes the settings modal on app.setting at runtime, but it is not in public typings.
+    const setting = (this.app as unknown as {
+      setting?: { open?: () => void; openTabById?: (id: string) => void };
+    }).setting;
+    if (setting?.open) {
+      setting.open();
+      setting.openTabById?.(this.manifest.id);
+      return;
+    }
+    new Notice("请打开 Obsidian 设置 → 社区插件 → Grok Obsidian");
+  }
+
   private async refreshDefaultModel(): Promise<void> {
     const resolution = resolveGrokBinary(this.settings);
     if (!resolution.found) {
       this.detectedDefaultModel = null;
       this.getPetView()?.setModel("未检测到 grok · 请安装并登录 CLI");
+      this.getPetView()?.setCliStatus(false, "未检测到 grok。请安装 CLI、执行 grok login，或在设置中填写可执行文件路径。");
       return;
     }
     // Always follow Grok Build / CLI default model (no plugin override).
     this.detectedDefaultModel = await detectDefaultGrokModel(this.settings);
     if (!this.detectedDefaultModel) {
       this.getPetView()?.setModel("已找到 CLI · 未能读取默认模型（可尝试 grok login）");
+      this.getPetView()?.setCliStatus(true, null);
       return;
     }
     this.getPetView()?.setModel(this.displayModel);
+    this.getPetView()?.setCliStatus(true, null);
   }
 
   private schedulePersist(): void {
@@ -244,12 +317,18 @@ export default class GrokBuildPlugin extends Plugin {
     const view = this.getPetView();
     if (!view) return;
     const activePath = this.resolvedActiveNotePath();
+    const activeView = this.app.workspace.getActiveViewOfType(MarkdownView);
+    const selectionText =
+      this.chatStore.current.includeActiveNote && activeView?.file?.path === activePath
+        ? activeView.editor.getSelection().trim()
+        : "";
     view.setActiveNotePath(activePath);
     view.setActiveNoteChipLabel(
       this.chatStore.current.includeActiveNote
         ? activeNoteChipLabel(activePath)
         : "当前笔记",
     );
+    view.setSelectionChars(selectionText.length || null);
     const openPaths = this.getOpenMarkdownPaths();
     const selected = this.chatStore.current.openTabPaths ?? [];
     // Drop selections that are no longer open.
@@ -265,8 +344,27 @@ export default class GrokBuildPlugin extends Plugin {
       })),
     );
     const draft = view.getComposerText();
-    const summary = this.estimateDraftContext(draft, this.pendingAttachments.length);
+    const summary = this.estimateDraftContext(draft, this.pendingAttachments.length, selectionText.length);
     view.setTurnContextSummary(summary.line, summary.truncated);
+    const selection = parseContextSelection(draft, {
+      files: this.contextLimits.maxFilesInMessage,
+      folders: this.contextLimits.maxFoldersInMessage,
+      tags: this.contextLimits.maxTagsInMessage,
+    });
+    const expanded = this.expandContextFiles(selection);
+    view.setContextInventory(
+      buildContextInventory({
+        includeActiveNote: this.chatStore.current.includeActiveNote,
+        activeNotePath: activePath,
+        openTabPaths: stillOpen,
+        draftMessage: draft,
+        attachmentCount: this.pendingAttachments.length,
+        expandedPaths: expanded.paths,
+        expansionCapped: expanded.expansionCapped,
+        selectionChars: selectionText.length,
+        limits: this.contextLimits,
+      }),
+    );
   }
 
   private toggleOpenTab(path: string, selected: boolean): void {
@@ -299,17 +397,31 @@ export default class GrokBuildPlugin extends Plugin {
       onDropContext: (paths) => view.insertContextPaths(paths),
       onRemoveAttachment: (id) => void this.removePendingAttachment(id),
       onToggleActiveNote: (value) => this.setIncludeActiveNote(value),
+      onOpenContextInventory: () => this.openContextInventory(),
+      onRefreshCli: () => this.refreshDefaultModelPublic(),
+      onOpenSettings: () => this.openPluginSettings(),
+      onTestCli: () => this.testGrokCliPublic(),
+      onUndoLastApply: () => this.undoLastApply(),
       onCopyMessage: (message) => void this.copyMessage(message),
       onEditMessage: (message) => this.editMessage(message),
       onRegenerateMessage: (message) => void this.regenerateMessage(message),
       onRetryMessage: (message) => void this.retryMessage(message),
       onApplyMessage: (message) => this.previewApply(message),
+      onWriteBackMessage: (action, text) => void this.writeBackResponse(action, text),
       onOpenSource: (path) => void this.openSource(path),
       onDraftContextChange: () => this.refreshContextUi(),
       onToggleOpenTab: (path, selected) => this.toggleOpenTab(path, selected),
     });
     view.setConversation(this.chatStore.current.messages, this.chatStore.current.includeActiveNote);
     view.setPendingAttachments(this.pendingAttachments);
+    view.setPendingUndoAvailable(isUndoEntryValid(this.lastApplyUndo));
+    const resolution = resolveGrokBinary(this.settings);
+    view.setCliStatus(
+      resolution.found,
+      resolution.found
+        ? null
+        : "未检测到 grok。请安装 CLI、执行 grok login，或在设置中填写可执行文件路径。",
+    );
     this.refreshContextUi();
   }
 
@@ -390,6 +502,34 @@ export default class GrokBuildPlugin extends Plugin {
     return paths;
   }
 
+  private findMarkdownView(path: string | null | undefined): MarkdownView | null {
+    const activeView = this.app.workspace.getActiveViewOfType(MarkdownView);
+    if (activeView?.file && (!path || activeView.file.path === path)) return activeView;
+
+    let found: MarkdownView | null = null;
+    this.app.workspace.iterateAllLeaves((leaf) => {
+      if (found) return;
+      const view = leaf.view;
+      if (view instanceof MarkdownView && view.file && (!path || view.file.path === path)) {
+        found = view;
+      }
+    });
+    return found;
+  }
+
+  private getWriteBackTarget(): { view: MarkdownView | null; file: TFile | null } {
+    const targetPath = this.resolvedActiveNotePath() ?? this.lastMarkdownPath;
+    const view = this.findMarkdownView(targetPath) ?? this.findMarkdownView(null);
+    if (view?.file) return { view, file: view.file };
+
+    const fallbackPath = targetPath ?? this.app.workspace.getActiveFile()?.path ?? null;
+    const abstract = fallbackPath ? this.app.vault.getAbstractFileByPath(fallbackPath) : null;
+    return {
+      view: null,
+      file: abstract instanceof TFile && abstract.extension === "md" ? abstract : null,
+    };
+  }
+
   private getFilesForTag(tag: string): TFile[] {
     return this.app.vault.getMarkdownFiles().filter((file) => {
       const cache = this.app.metadataCache.getFileCache(file);
@@ -430,24 +570,24 @@ export default class GrokBuildPlugin extends Plugin {
             TEXT_CONTEXT_EXTENSIONS.has(file.extension.toLowerCase()),
         );
       folderHits.push(matches.length);
-      if (matches.length > CONTEXT_LIMITS.maxFilesPerFolder) expansionCapped = true;
-      matches.slice(0, CONTEXT_LIMITS.maxFilesPerFolder).forEach((file) => paths.add(file.path));
+      if (matches.length > this.contextLimits.maxFilesPerFolder) expansionCapped = true;
+      matches.slice(0, this.contextLimits.maxFilesPerFolder).forEach((file) => paths.add(file.path));
     }
     for (const tag of selection.tags) {
       sources.push({ path: `#${tag}`, label: `#${tag}`, kind: "tag" });
       const matches = this.getFilesForTag(tag);
       tagHits.push(matches.length);
-      if (matches.length > CONTEXT_LIMITS.maxFilesPerTag) expansionCapped = true;
-      matches.slice(0, CONTEXT_LIMITS.maxFilesPerTag).forEach((file) => paths.add(file.path));
+      if (matches.length > this.contextLimits.maxFilesPerTag) expansionCapped = true;
+      matches.slice(0, this.contextLimits.maxFilesPerTag).forEach((file) => paths.add(file.path));
     }
 
     const all = Array.from(paths);
-    if (all.length > CONTEXT_LIMITS.maxExpandedPaths) expansionCapped = true;
-    const estimate = estimateExpansionCap(selection, folderHits, tagHits);
+    if (all.length > this.contextLimits.maxExpandedPaths) expansionCapped = true;
+    const estimate = estimateExpansionCap(selection, folderHits, tagHits, this.contextLimits);
     expansionCapped = expansionCapped || estimate.expansionCapped;
 
     return {
-      paths: all.slice(0, CONTEXT_LIMITS.maxExpandedPaths),
+      paths: all.slice(0, this.contextLimits.maxExpandedPaths),
       sources,
       expansionCapped,
     };
@@ -471,8 +611,8 @@ export default class GrokBuildPlugin extends Plugin {
       try {
         const content = await this.app.vault.cachedRead(file);
         const allowed = Math.min(
-          CONTEXT_LIMITS.maxCharsPerFile,
-          Math.max(0, CONTEXT_LIMITS.maxCharsTotal - total),
+          this.contextLimits.maxCharsPerFile,
+          Math.max(0, this.contextLimits.maxCharsTotal - total),
         );
         const included = content.slice(0, allowed);
         total += included.length;
@@ -514,9 +654,9 @@ export default class GrokBuildPlugin extends Plugin {
     includeHistory: boolean,
   ): Promise<{ prompt: string; sources: ChatSource[] }> {
     const selection = parseContextSelection(message, {
-      files: CONTEXT_LIMITS.maxFilesInMessage,
-      folders: CONTEXT_LIMITS.maxFoldersInMessage,
-      tags: CONTEXT_LIMITS.maxTagsInMessage,
+      files: this.contextLimits.maxFilesInMessage,
+      folders: this.contextLimits.maxFoldersInMessage,
+      tags: this.contextLimits.maxTagsInMessage,
     });
     const expanded = this.expandContextFiles(selection);
     const activeView = this.app.workspace.getActiveViewOfType(MarkdownView);
@@ -809,11 +949,15 @@ export default class GrokBuildPlugin extends Plugin {
   }
 
   /** Used by the pet view to estimate turn context without re-reading file bodies. */
-  estimateDraftContext(draftMessage: string, attachmentCount: number): ReturnType<typeof summarizeTurnContext> {
+  estimateDraftContext(
+    draftMessage: string,
+    attachmentCount: number,
+    selectionChars = 0,
+  ): ReturnType<typeof summarizeTurnContext> {
     const selection = parseContextSelection(draftMessage, {
-      files: CONTEXT_LIMITS.maxFilesInMessage,
-      folders: CONTEXT_LIMITS.maxFoldersInMessage,
-      tags: CONTEXT_LIMITS.maxTagsInMessage,
+      files: this.contextLimits.maxFilesInMessage,
+      folders: this.contextLimits.maxFoldersInMessage,
+      tags: this.contextLimits.maxTagsInMessage,
     });
     const expanded = this.expandContextFiles(selection);
     const activeNotePath = this.resolvedActiveNotePath();
@@ -831,6 +975,8 @@ export default class GrokBuildPlugin extends Plugin {
       attachmentCount,
       expandedPathCount,
       expansionCapped: expanded.expansionCapped,
+      selectionChars,
+      limits: this.contextLimits,
     });
     const tabCount = (this.chatStore.current.openTabPaths ?? []).length;
     if (tabCount > 0) {
@@ -988,9 +1134,180 @@ export default class GrokBuildPlugin extends Plugin {
     const active = this.app.workspace.getActiveFile();
     const fallbackPath =
       active && !active.path.includes("..") ? active.path : undefined;
-    new ApplyDiffModal(this.app, message.text, fallbackPath, (summary) =>
-      new Notice(summary),
+    new ApplyDiffModal(this.app, message.text, fallbackPath, (summary, undo) => {
+      const notice = new Notice(summary, 6000);
+      if (undo && isUndoEntryValid(undo)) {
+        this.lastApplyUndo = undo;
+        this.getPetView()?.setPendingUndoAvailable(true);
+        const undoButton = notice.noticeEl.createEl("button", {
+          cls: "grok-undo-button",
+          text: "撤销",
+          attr: { type: "button" },
+        });
+        undoButton.addEventListener("click", () => void this.undoApply(undo));
+      }
+    }, (action, text) => this.writeBackResponse(action, text)).open();
+  }
+
+  private async undoApply(entry: ApplyUndoEntry): Promise<void> {
+    if (!isUndoEntryValid(entry)) {
+      this.lastApplyUndo = null;
+      this.getPetView()?.setPendingUndoAvailable(false);
+      new Notice("撤销已过期");
+      return;
+    }
+    const actions = planUndoActions(entry);
+    for (const action of actions) {
+      const abstract = this.app.vault.getAbstractFileByPath(action.path);
+      if (action.action === "delete") {
+        if (abstract instanceof TFile) {
+          await this.app.vault.delete(abstract);
+        }
+      } else if (abstract instanceof TFile) {
+        await this.app.vault.modify(abstract, action.content);
+      } else {
+        await this.app.vault.create(action.path, action.content);
+      }
+    }
+    if (this.lastApplyUndo?.id === entry.id) {
+      this.lastApplyUndo = null;
+      this.getPetView()?.setPendingUndoAvailable(false);
+    }
+    new Notice("已撤销最近一次应用");
+  }
+
+  private async undoLastApply(): Promise<void> {
+    const entry = this.lastApplyUndo;
+    if (!entry || !isUndoEntryValid(entry)) {
+      this.lastApplyUndo = null;
+      this.getPetView()?.setPendingUndoAvailable(false);
+      new Notice("没有可撤销的最近应用");
+      return;
+    }
+    await this.undoApply(entry);
+  }
+
+  private openContextInventory(): void {
+    const activePath = this.resolvedActiveNotePath();
+    const activeView = this.app.workspace.getActiveViewOfType(MarkdownView);
+    const selectionText =
+      this.chatStore.current.includeActiveNote && activeView?.file?.path === activePath
+        ? activeView.editor.getSelection().trim()
+        : "";
+    const draft = this.getPetView()?.getComposerText() ?? "";
+    const selection = parseContextSelection(draft, {
+      files: this.contextLimits.maxFilesInMessage,
+      folders: this.contextLimits.maxFoldersInMessage,
+      tags: this.contextLimits.maxTagsInMessage,
+    });
+    const expanded = this.expandContextFiles(selection);
+    new ContextInventoryModal(
+      this.app,
+      buildContextInventory({
+        includeActiveNote: this.chatStore.current.includeActiveNote,
+        activeNotePath: activePath,
+        openTabPaths: this.chatStore.current.openTabPaths ?? [],
+        draftMessage: draft,
+        attachmentCount: this.pendingAttachments.length,
+        expandedPaths: expanded.paths,
+        expansionCapped: expanded.expansionCapped,
+        selectionChars: selectionText.length,
+        limits: this.contextLimits,
+      }),
+      (path) => this.openSource(path),
+      (item) => this.removeContextInventoryItem(item),
     ).open();
+  }
+
+  private removeContextInventoryItem(item: ContextInventoryItem): void {
+    const view = this.getPetView();
+    if (item.kind === "active-note") {
+      this.setIncludeActiveNote(false);
+      new Notice("已关闭当前笔记上下文");
+      return;
+    }
+    if (item.kind === "open-tab" && item.path) {
+      this.toggleOpenTab(item.path, false);
+      new Notice("已移除打开标签上下文");
+      return;
+    }
+    if (item.kind === "image") {
+      this.pendingAttachments = [];
+      view?.setPendingAttachments([]);
+      this.refreshContextUi();
+      new Notice("已移除待发送图片");
+      return;
+    }
+    if (item.token && view) {
+      const draft = view.getComposerText();
+      const next = draft
+        .replace(item.token, "")
+        .replace(/[ \t]{2,}/g, " ")
+        .replace(/\s+\n/g, "\n")
+        .trimStart();
+      view.setComposerText(next);
+      this.refreshContextUi();
+      new Notice("已移除此上下文");
+    }
+  }
+
+  private async writeBackResponse(action: "insert" | "append" | "create", text: string): Promise<void> {
+    const target = this.getWriteBackTarget();
+    const activeFile = target.file ?? this.app.workspace.getActiveFile();
+    if ((action === "insert" || action === "append") && activeFile) {
+      const ok = await new ConfirmModal(
+        this.app,
+        action === "insert" ? "插入到当前笔记" : "追加到当前笔记",
+        `将写入：${activeFile.path}\n\n请确认要写入这段回答。`,
+        action === "insert" ? "确认插入" : "确认追加",
+        "取消",
+      ).wait();
+      if (!ok) return;
+    }
+    if (action === "insert") {
+      let editor = target.view?.editor ?? null;
+      if (!editor && target.file) {
+        await this.app.workspace.getLeaf("tab").openFile(target.file);
+        editor = this.findMarkdownView(target.file.path)?.editor ?? null;
+      }
+      if (!editor) {
+        new Notice("当前没有可写入的 Markdown 编辑器");
+        return;
+      }
+      editor.replaceSelection(text);
+      new Notice("已插入到当前笔记");
+      return;
+    }
+    if (action === "append") {
+      const editor = target.view?.editor ?? null;
+      if (editor) {
+        const prefix = editor.getValue().trimEnd().length > 0 ? "\n\n" : "";
+        const lastLine = editor.lastLine();
+        const end = { line: lastLine, ch: editor.getLine(lastLine).length };
+        editor.replaceRange(`${prefix}${text}`, end);
+        new Notice("已追加到当前笔记");
+        return;
+      }
+      if (!activeFile) {
+        new Notice("当前没有可写入的 Markdown 文件");
+        return;
+      }
+      const current = await this.app.vault.read(activeFile);
+      const prefix = current.trimEnd().length > 0 ? "\n\n" : "";
+      await this.app.vault.modify(activeFile, `${current}${prefix}${text}`);
+      await this.app.workspace.getLeaf("tab").openFile(activeFile);
+      new Notice("已追加到当前笔记");
+      return;
+    }
+    const parent = activeFile?.parent?.path ?? target.view?.file?.parent?.path ?? "";
+    const stem = activeFile?.basename ? `${activeFile.basename} - Grok` : "Grok note";
+    const path = await this.app.fileManager.getAvailablePathForAttachment(
+      parent ? `${parent}/${stem}.md` : `${stem}.md`,
+    );
+    await this.app.vault.create(path, text);
+    const file = this.app.vault.getAbstractFileByPath(path);
+    if (file instanceof TFile) await this.app.workspace.getLeaf("tab").openFile(file);
+    new Notice("已新建笔记");
   }
 
   private async openSource(path: string): Promise<void> {

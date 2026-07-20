@@ -229,13 +229,13 @@ export function applyReplacements(
     if (occurrences === 0) {
       return {
         ok: false,
-        error: `第 ${index + 1} 处 SEARCH 未在文件中找到唯一匹配`,
+        error: `第 ${index + 1} 处 SEARCH 未匹配：目标文件中找不到这段原文`,
       };
     }
     if (occurrences > 1) {
       return {
         ok: false,
-        error: `第 ${index + 1} 处 SEARCH 匹配了 ${occurrences} 次，已拒绝（需唯一）`,
+        error: `第 ${index + 1} 处 SEARCH 匹配多处：共 ${occurrences} 次，需让模型提供唯一片段`,
       };
     }
     next = next.replace(item.search, item.replace);

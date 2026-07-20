@@ -10,13 +10,19 @@ const DEFAULT_LIMITS = {
   tags: 6,
 } as const;
 
+export interface ContextParseLimits {
+  files?: number;
+  folders?: number;
+  tags?: number;
+}
+
 /**
  * Parse @[[file]], @{folder}, and #tag tokens from a user message.
  * Tag matching is exact (with optional leading #); hierarchical parents are not expanded here.
  */
 export function parseContextSelection(
   message: string,
-  limits: Partial<typeof DEFAULT_LIMITS> = {},
+  limits: ContextParseLimits = {},
 ): ParsedContextSelection {
   const fileLimit = limits.files ?? DEFAULT_LIMITS.files;
   const folderLimit = limits.folders ?? DEFAULT_LIMITS.folders;

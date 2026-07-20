@@ -5,6 +5,7 @@ import {
   type ChatMessage,
   type PersistedChatState,
 } from "./chatTypes";
+import { sortConversationsForHistory } from "./historyFilter";
 
 export class ChatStore {
   private state: PersistedChatState;
@@ -33,7 +34,7 @@ export class ChatStore {
   }
 
   list(): ChatConversation[] {
-    return [...this.state.conversations].sort((a, b) => b.updatedAt - a.updatedAt);
+    return sortConversationsForHistory(this.state.conversations);
   }
 
   select(id: string): ChatConversation | null {
@@ -140,6 +141,15 @@ export class ChatStore {
     return true;
   }
 
+  setPinned(id: string, pinned: boolean): boolean {
+    const conversation = this.state.conversations.find((item) => item.id === id);
+    if (!conversation) return false;
+    conversation.pinned = pinned;
+    conversation.updatedAt = Date.now();
+    this.trim();
+    return true;
+  }
+
   exportMarkdown(id: string): string | null {
     const conversation = this.state.conversations.find((item) => item.id === id);
     if (!conversation) return null;
@@ -199,6 +209,7 @@ export class ChatStore {
       .filter((item) => item && typeof item.id === "string" && Array.isArray(item.messages))
       .map((item) => ({
         ...item,
+        pinned: Boolean(item.pinned),
         includeActiveNote:
           typeof item.includeActiveNote === "boolean" ? item.includeActiveNote : includeActiveNote,
         messages: item.messages
@@ -223,10 +234,18 @@ export class ChatStore {
   }
 
   private trim(): void {
-    const sorted = this.list().slice(0, Math.max(1, this.historyLimit));
-    this.state.conversations = sorted;
-    if (!sorted.some((item) => item.id === this.state.currentConversationId)) {
-      this.state.currentConversationId = sorted[0].id;
+    const limit = Math.max(1, this.historyLimit);
+    const sorted = this.list();
+    const pinned = sorted.filter((c) => c.pinned);
+    const unpinned = sorted.filter((c) => !c.pinned);
+    // Always keep all pinned, then fill remaining slots with newest unpinned.
+    const room = Math.max(limit, pinned.length);
+    const keptUnpinned = unpinned.slice(0, Math.max(0, room - pinned.length));
+    const kept = [...pinned, ...keptUnpinned];
+    // Preserve list() order (pinned first).
+    this.state.conversations = sortConversationsForHistory(kept);
+    if (!this.state.conversations.some((item) => item.id === this.state.currentConversationId)) {
+      this.state.currentConversationId = this.state.conversations[0].id;
     }
   }
 }

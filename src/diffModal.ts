@@ -9,8 +9,32 @@ import {
   type ProposedChange,
   type ResolvedChange,
 } from "./diffUtils";
+import {
+  createApplyUndoEntry,
+  type ApplyUndoEntry,
+  type FileSnapshot,
+} from "./applyUndo";
+import { ConfirmModal } from "./confirmModal";
 
 type ResolvedWithState = ResolvedChange & { applied?: boolean };
+
+export type DiffWriteBackAction = "insert" | "append" | "create";
+
+function statusLabel(item: ResolvedWithState): string {
+  if (item.applied) return "已应用";
+  if (item.error) return item.error === "没有实际变化" ? "无变化" : "失败";
+  if (item.change.kind === "partial") return "局部";
+  if (item.change.kind === "create" || !item.exists) return "新增";
+  return "修改";
+}
+
+function statusClass(item: ResolvedWithState): string {
+  if (item.applied) return "is-applied";
+  if (item.error) return item.error === "没有实际变化" ? "is-unchanged" : "is-error";
+  if (item.change.kind === "partial") return "is-partial";
+  if (item.change.kind === "create" || !item.exists) return "is-create";
+  return "is-full";
+}
 
 export class ApplyDiffModal extends Modal {
   private resolved: ResolvedWithState[] = [];
@@ -19,12 +43,14 @@ export class ApplyDiffModal extends Modal {
   private footerEl!: HTMLElement;
   private activePath: string | null = null;
   private appliedCount = 0;
+  private snapshots: FileSnapshot[] = [];
 
   constructor(
     app: App,
     private readonly responseText: string,
     private readonly fallbackPath: string | undefined,
-    private readonly onApplied: (summary: string) => void,
+    private readonly onApplied: (summary: string, undo: ApplyUndoEntry | null) => void,
+    private readonly onWriteBack?: (action: DiffWriteBackAction, text: string) => void | Promise<void>,
   ) {
     super(app);
   }
@@ -46,14 +72,26 @@ export class ApplyDiffModal extends Modal {
     if (proposed.length === 0) {
       contentEl.createDiv({
         cls: "grok-diff-empty",
-        text: "回答中没有可解析的文件更改。可让模型按「路径 + 代码块」输出全文，或对已有文件使用 SEARCH/REPLACE 局部块。",
+        text: "回答中没有可解析的文件更改。可让模型按「路径 + 代码块」输出全文，或对已有文件使用 SEARCH/REPLACE 局部块。也可以把本回答直接写入笔记：",
       });
+      const actions = contentEl.createDiv({ cls: "grok-diff-fallback-actions" });
+      const makeBtn = (label: string, action: DiffWriteBackAction) => {
+        const btn = actions.createEl("button", { cls: action === "create" ? "mod-cta" : "", text: label });
+        btn.addEventListener("click", async () => {
+          await this.onWriteBack?.(action, this.responseText);
+          this.close();
+        });
+      };
+      makeBtn("插入到光标", "insert");
+      makeBtn("追加到当前笔记", "append");
+      makeBtn("新建笔记", "create");
       new Setting(contentEl).addButton((button) =>
         button.setButtonText("关闭").onClick(() => this.close()),
       );
       return;
     }
 
+    // Detect pure fallback whole-file replace of active note with no path fences.
     this.resolved = await Promise.all(proposed.map((change) => this.resolveChange(change)));
     this.activePath = this.resolved[0]?.change.path ?? null;
 
@@ -134,11 +172,16 @@ export class ApplyDiffModal extends Modal {
         cls: "grok-diff-file-path",
         text: item.change.path,
       });
+      const badge = main.createSpan({
+        cls: `grok-diff-status-badge ${statusClass(item)}`,
+        text: statusLabel(item),
+      });
+      badge.setAttr("title", kindLabel(item.change.kind, item.exists));
       const meta = [
-        item.applied ? "已应用" : kindLabel(item.change.kind, item.exists),
+        kindLabel(item.change.kind, item.exists),
         item.error
           ? item.error
-          : `+${item.stats.added} / -${item.stats.removed}`,
+          : `+${item.stats.added} / -${item.stats.removed} · ${item.before.length} → ${item.after.length} 字符`,
       ].join(" · ");
       main.createDiv({ cls: "grok-diff-file-meta", text: meta });
 
@@ -191,6 +234,25 @@ export class ApplyDiffModal extends Modal {
           }
         }
       }
+      // Offer write-back fallbacks when partial failed
+      if (this.onWriteBack) {
+        const fallback = this.detailEl.createDiv({ cls: "grok-diff-fallback-actions" });
+        fallback.createDiv({
+          cls: "grok-diff-stats",
+          text: "局部修改无法应用时，可将整段回答写入笔记：",
+        });
+        for (const [label, action] of [
+          ["插入到光标", "insert"],
+          ["追加到当前笔记", "append"],
+          ["新建笔记", "create"],
+        ] as const) {
+          const btn = fallback.createEl("button", { text: label });
+          btn.addEventListener("click", async () => {
+            await this.onWriteBack?.(action, this.responseText);
+            this.close();
+          });
+        }
+      }
       return;
     }
 
@@ -199,6 +261,17 @@ export class ApplyDiffModal extends Modal {
         cls: "grok-diff-stats",
         text: `+${item.stats.added} / -${item.stats.removed} 行。可单独应用此文件，或勾选后一键应用全部。`,
       });
+      if (item.change.kind !== "partial") {
+        const changed = item.stats.added + item.stats.removed;
+        const large = Math.max(item.before.length, item.after.length) >= 20_000 || changed >= 80;
+        this.detailEl.createDiv({
+          cls: `grok-diff-warn${large ? " is-large" : ""}`,
+          text:
+            item.change.kind === "create"
+              ? `将新建文件并写入全文（${item.after.length} 字符）。`
+              : `全文替换：会覆盖目标文件现有内容（${item.before.length} → ${item.after.length} 字符）。${large ? " 这是较大的全文写入，请仔细核对。" : ""}`,
+        });
+      }
     }
 
     const diff = this.detailEl.createEl("pre", { cls: "grok-diff-preview" });
@@ -280,13 +353,23 @@ export class ApplyDiffModal extends Modal {
     }
   }
 
+  private needsFullReplaceConfirm(item: ResolvedWithState): boolean {
+    if (item.change.kind === "partial") return false;
+    // Large full replace or create always confirm; also when fallbackPath-only whole file.
+    const changed = item.stats.added + item.stats.removed;
+    return item.change.kind === "create" || item.change.kind === "full" || changed >= 20;
+  }
+
   private async applyOne(item: ResolvedWithState): Promise<string | null> {
     if (item.error || item.applied) return item.error ?? null;
     try {
       const abstract = this.app.vault.getAbstractFileByPath(item.change.path);
+      const beforeSnapshot: string | null =
+        abstract instanceof TFile ? await this.app.vault.read(abstract) : null;
+
       if (item.change.kind === "partial") {
         if (!(abstract instanceof TFile)) return "文件不存在";
-        const latest = await this.app.vault.read(abstract);
+        const latest = beforeSnapshot ?? "";
         const result = materializeChange(latest, item.change, true);
         if (!result.ok) return result.error;
         await this.app.vault.modify(abstract, result.after);
@@ -299,6 +382,7 @@ export class ApplyDiffModal extends Modal {
           await this.app.vault.create(item.change.path, body);
         }
       }
+      this.snapshots.push({ path: item.change.path, before: beforeSnapshot });
       item.applied = true;
       item.selected = false;
       this.appliedCount += 1;
@@ -309,10 +393,24 @@ export class ApplyDiffModal extends Modal {
   }
 
   private async applyItems(items: ResolvedWithState[], advance: boolean): Promise<void> {
-    const targets = items.filter((item) => !item.error && !item.applied);
+    let targets = items.filter((item) => !item.error && !item.applied);
     if (targets.length === 0) {
       new Notice("没有可应用的更改");
       return;
+    }
+
+    const needsConfirm = targets.filter((item) => this.needsFullReplaceConfirm(item));
+    if (needsConfirm.length > 0) {
+      const names = needsConfirm.map((i) => i.change.path).slice(0, 5).join("\n");
+      const ok = await new ConfirmModal(
+        this.app,
+        "确认全文替换 / 新建",
+        `以下 ${needsConfirm.length} 个文件将全文写入（覆盖或新建），请确认：\n${names}${needsConfirm.length > 5 ? "\n…" : ""}`,
+        "确认应用",
+        "取消",
+        true,
+      ).wait();
+      if (!ok) return;
     }
 
     const applied: string[] = [];
@@ -333,10 +431,13 @@ export class ApplyDiffModal extends Modal {
           /* ignore */
         }
       }
+      const undo =
+        this.snapshots.length > 0 ? createApplyUndoEntry([...this.snapshots]) : null;
       this.onApplied(
         failed.length
           ? `已应用 ${applied.length} 个文件；失败 ${failed.length} 个`
           : `已应用 ${applied.length} 个文件`,
+        undo,
       );
     }
     if (failed.length) {
