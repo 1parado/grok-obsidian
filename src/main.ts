@@ -45,6 +45,10 @@ import {
 } from "./turnContextSummary";
 import { buildContextInventory, type ContextInventoryItem } from "./contextInventory";
 import { isUndoEntryValid, planUndoActions, type ApplyUndoEntry } from "./applyUndo";
+import {
+  attachmentVaultPaths,
+  rewriteImageEmbeds,
+} from "./imageEmbedRewrite";
 
 const TEXT_CONTEXT_EXTENSIONS = new Set([
   "md", "txt", "json", "jsonc", "yaml", "yml", "toml", "csv", "tsv",
@@ -690,7 +694,7 @@ export default class GrokBuildPlugin extends Plugin {
         ? activeView.editor.getSelection().trim()
         : "";
     const history = includeHistory ? this.recentConversationText() : "";
-    const imagePaths = attachments.map((item) => item.path);
+    const imagePaths = attachmentVaultPaths(attachments);
 
     const prompt = [
       "You are Grok Obsidian, a conversational assistant inside an Obsidian vault.",
@@ -720,8 +724,14 @@ export default class GrokBuildPlugin extends Plugin {
       ...(imagePaths.length
         ? [
             "--- ATTACHED IMAGES ---",
-            ...imagePaths,
-            "The image content is attached as ACP image blocks.",
+            "These image files are ALREADY saved in the vault at the vault-relative paths below.",
+            "The binary is also sent as ACP image blocks for vision only — that is not a separate file path.",
+            "When embedding an image into a note, you MUST use the exact path listed here.",
+            "Correct Obsidian syntax: ![[exact/vault/path.png]]",
+            "Never invent filenames such as image-<uuid>.png, session asset ids, or temporary ACP names.",
+            "Never claim the user must copy the image into the vault; it is already there.",
+            "Attached vault paths:",
+            ...imagePaths.map((path, index) => `${index + 1}. ${path}`),
             "--- END IMAGES ---",
             "",
           ]
@@ -857,9 +867,11 @@ export default class GrokBuildPlugin extends Plugin {
           thoughtText,
         });
       } else if (result.ok) {
+        const rawText = result.text || partial || "任务已完成，但没有返回文字。";
+        const fixedText = this.rewriteAssistantImageEmbeds(rawText, attachments);
         this.chatStore.updateMessage(assistant.id, {
           status: "complete",
-          text: result.text || partial || "任务已完成，但没有返回文字。",
+          text: fixedText,
           errorDetails: undefined,
           thoughtText,
         });
@@ -1134,7 +1146,12 @@ export default class GrokBuildPlugin extends Plugin {
     const active = this.app.workspace.getActiveFile();
     const fallbackPath =
       active && !active.path.includes("..") ? active.path : undefined;
-    new ApplyDiffModal(this.app, message.text, fallbackPath, (summary, undo) => {
+    // Fix invented image-* embeds using this turn's attachments (and any stored on the message).
+    const responseText = this.rewriteAssistantImageEmbeds(
+      message.text,
+      message.retryAttachments ?? [],
+    );
+    new ApplyDiffModal(this.app, responseText, fallbackPath, (summary, undo) => {
       const notice = new Notice(summary, 6000);
       if (undo && isUndoEntryValid(undo)) {
         this.lastApplyUndo = undo;
@@ -1147,6 +1164,42 @@ export default class GrokBuildPlugin extends Plugin {
         undoButton.addEventListener("click", () => void this.undoApply(undo));
       }
     }, (action, text) => this.writeBackResponse(action, text)).open();
+  }
+
+  /**
+   * Replace model-invented image embed targets (e.g. image-<uuid>.png) with real
+   * vault attachment paths from the current turn. Also rewrites missing image
+   * targets when the vault cannot resolve them.
+   */
+  private rewriteAssistantImageEmbeds(
+    text: string,
+    attachments: ChatAttachment[],
+  ): string {
+    const knownPaths = attachmentVaultPaths(attachments);
+    if (!text || knownPaths.length === 0) return text;
+    const { text: fixed, rewrites } = rewriteImageEmbeds(text, knownPaths, {
+      pathExists: (vaultRelativePath) => this.vaultPathResolves(vaultRelativePath),
+    });
+    if (rewrites.length > 0) {
+      console.debug(
+        "[Grok Obsidian] rewrote image embeds:",
+        rewrites.map((item) => `${item.from} → ${item.to}`).join("; "),
+      );
+    }
+    return fixed;
+  }
+
+  /** True when Obsidian can resolve a wikilink/embed path to an existing file. */
+  private vaultPathResolves(vaultRelativePath: string): boolean {
+    const normalized = vaultRelativePath.replace(/\\/g, "/").replace(/^\/+/, "");
+    if (!normalized) return false;
+    if (this.app.vault.getAbstractFileByPath(normalized) instanceof TFile) return true;
+    try {
+      const dest = this.app.metadataCache.getFirstLinkpathDest(normalized, "");
+      return dest instanceof TFile;
+    } catch {
+      return false;
+    }
   }
 
   private async undoApply(entry: ApplyUndoEntry): Promise<void> {

@@ -22,6 +22,7 @@ await build({
     path.join(root, "src/processTree.ts"),
     path.join(root, "src/runWatchdog.ts"),
     path.join(root, "src/contextInventory.ts"),
+    path.join(root, "src/imageEmbedRewrite.ts"),
   ],
   outdir: outDir,
   format: "esm",
@@ -66,6 +67,11 @@ const { resolveIdleTimeoutMs, RunWatchdog } = await import(
 const { buildContextInventory } = await import(
   pathToFileURL(path.join(outDir, "contextInventory.js")).href
 );
+const {
+  rewriteImageEmbeds,
+  isHallucinatedImageName,
+  attachmentVaultPaths,
+} = await import(pathToFileURL(path.join(outDir, "imageEmbedRewrite.js")).href);
 
 test("extractCandidate prefers whole-message fenced markdown", () => {
   const text = "```md\n# Title\nbody\n```";
@@ -464,6 +470,84 @@ test("source wiring: last-markdown tracking, history confirm, diff open, history
   assert.match(contextInventoryModal, /grok-context-inventory/);
   assert.match(contextInventoryModal, /复制清单/);
   assert.match(contextInventoryModal, /onRemoveItem/);
+  assert.match(main, /rewriteAssistantImageEmbeds|rewriteImageEmbeds/);
+  assert.match(main, /ATTACHED IMAGES/);
+  assert.match(main, /Never invent filenames/);
+});
+
+test("isHallucinatedImageName detects session-style image ids", () => {
+  assert.equal(
+    isHallucinatedImageName("image-ca30f9c0-0de2-406c-9a7c-b534140f21b4.png"),
+    true,
+  );
+  assert.equal(isHallucinatedImageName("image_abc12def-1234-5678-9abc-def012345678.jpg"), true);
+  assert.equal(
+    isHallucinatedImageName("Grok Screenshot 2026-07-20-06-07-17-56-1.png"),
+    false,
+  );
+  assert.equal(isHallucinatedImageName("notes/photo.png"), false);
+});
+
+test("rewriteImageEmbeds fixes hallucinated wiki embeds to real vault paths", () => {
+  const known = ["Grok Screenshot 2026-07-20-06-07-17-56-1.png"];
+  const text = [
+    "### 小说/第二章.md",
+    "<<<<<<< SEARCH",
+    "end",
+    "=======",
+    "end",
+    "",
+    "![[image-ca30f9c0-0de2-406c-9a7c-b534140f21b4.png]]",
+    ">>>>>>> REPLACE",
+  ].join("\n");
+  const result = rewriteImageEmbeds(text, known);
+  assert.match(
+    result.text,
+    /!\[\[Grok Screenshot 2026-07-20-06-07-17-56-1\.png\]\]/,
+  );
+  assert.equal(result.rewrites.length, 1);
+  assert.equal(result.rewrites[0].from, "image-ca30f9c0-0de2-406c-9a7c-b534140f21b4.png");
+  assert.equal(result.rewrites[0].to, known[0]);
+});
+
+test("rewriteImageEmbeds rewrites missing markdown images when pathExists says no", () => {
+  const known = ["attachments/real.png"];
+  const text = "see ![shot](tmp/missing.png) and keep https://example.com/a.png";
+  const result = rewriteImageEmbeds(text, known, {
+    pathExists: (p) => p === "attachments/real.png",
+  });
+  assert.match(result.text, /!\[\[attachments\/real\.png\]\]/);
+  assert.match(result.text, /https:\/\/example\.com\/a\.png/);
+  assert.equal(result.rewrites.length, 1);
+});
+
+test("rewriteImageEmbeds keeps embeds that already match known paths", () => {
+  const known = ["folder/Grok Screenshot 1.png"];
+  const text = "![[folder/Grok Screenshot 1.png]]";
+  const result = rewriteImageEmbeds(text, known);
+  assert.equal(result.text, text);
+  assert.equal(result.rewrites.length, 0);
+});
+
+test("rewriteImageEmbeds normalizes basename-only known match to full path", () => {
+  const known = ["assets/shot.png"];
+  const text = "![[shot.png]]";
+  const result = rewriteImageEmbeds(text, known);
+  assert.equal(result.text, "![[assets/shot.png]]");
+  assert.equal(result.rewrites.length, 1);
+});
+
+test("attachmentVaultPaths dedupes and skips empty", () => {
+  assert.deepEqual(
+    attachmentVaultPaths([
+      { path: "a.png" },
+      { path: "a.png" },
+      { path: "" },
+      null,
+      { path: "b.png" },
+    ]),
+    ["a.png", "b.png"],
+  );
 });
 
 test.after(() => {

@@ -22089,6 +22089,125 @@ function countRawMentions2(message, pattern) {
   return Array.from(message.matchAll(pattern)).length;
 }
 
+// src/imageEmbedRewrite.ts
+var IMAGE_EXT_RE = /\.(png|jpe?g|gif|webp|bmp|svg)$/i;
+var HALLUCINATED_IMAGE_RE = /^(?:image[-_])?[0-9a-f]{8}(?:-[0-9a-f]{4}){1,4}[-0-9a-f]*\.(?:png|jpe?g|gif|webp|bmp|svg)$/i;
+function normalizePath(raw) {
+  let path2 = raw.trim();
+  path2 = path2.replace(/^["'`]+|["'`]+$/g, "");
+  path2 = path2.replace(/\\/g, "/");
+  path2 = path2.replace(/^\.?\//, "");
+  path2 = path2.replace(/^\/+/, "");
+  return path2.trim();
+}
+function basename3(path2) {
+  const normalized = normalizePath(path2);
+  const parts = normalized.split("/");
+  return parts[parts.length - 1] ?? normalized;
+}
+function wikiTargetPath(inner) {
+  let target = inner.trim();
+  target = target.split("|")[0] ?? target;
+  target = target.split("#")[0] ?? target;
+  target = target.split("^")[0] ?? target;
+  return normalizePath(target);
+}
+function isHallucinatedImageName(pathOrName) {
+  return HALLUCINATED_IMAGE_RE.test(basename3(pathOrName));
+}
+function isImagePath(pathOrName) {
+  const name = basename3(pathOrName);
+  return IMAGE_EXT_RE.test(name) || isHallucinatedImageName(name);
+}
+function pathMatchesKnown(target, known) {
+  const t = normalizePath(target);
+  const k = normalizePath(known);
+  if (!t || !k)
+    return false;
+  if (t === k)
+    return true;
+  return basename3(t) === basename3(k);
+}
+function findKnownMatch(target, knownPaths) {
+  return knownPaths.find((known) => pathMatchesKnown(target, known)) ?? null;
+}
+function resolveImageEmbedTarget(target, knownPaths, nextKnownIndex, options = {}) {
+  const known = knownPaths.map(normalizePath).filter(Boolean);
+  if (known.length === 0)
+    return null;
+  const normalized = normalizePath(target);
+  if (!normalized || !isImagePath(normalized))
+    return null;
+  const exact = findKnownMatch(normalized, known);
+  if (exact) {
+    return exact !== normalized ? exact : null;
+  }
+  const exists = options.pathExists?.(normalized) === true;
+  if (exists)
+    return null;
+  const hallucinated = isHallucinatedImageName(normalized);
+  if (!options.pathExists && !hallucinated)
+    return null;
+  if (options.pathExists && !hallucinated && exists)
+    return null;
+  const index = Math.min(nextKnownIndex.value, known.length - 1);
+  nextKnownIndex.value = Math.min(nextKnownIndex.value + 1, known.length);
+  return known[index] ?? null;
+}
+function rewriteImageEmbeds(text, knownPaths, options = {}) {
+  if (!text || knownPaths.length === 0) {
+    return { text, rewrites: [] };
+  }
+  const known = knownPaths.map(normalizePath).filter(Boolean);
+  if (known.length === 0)
+    return { text, rewrites: [] };
+  const rewrites = [];
+  const nextKnownIndex = { value: 0 };
+  let output = text;
+  output = output.replace(/!\[\[([^\]]+)\]\]/g, (full, inner) => {
+    const target = wikiTargetPath(inner);
+    if (!target || !isImagePath(target))
+      return full;
+    const replacement = resolveImageEmbedTarget(target, known, nextKnownIndex, options);
+    if (!replacement)
+      return full;
+    rewrites.push({ from: target, to: replacement });
+    const aliasPart = inner.includes("|") ? inner.slice(inner.indexOf("|")) : "";
+    return `![[${replacement}${aliasPart}]]`;
+  });
+  output = output.replace(
+    /!\[([^\]]*)\]\(([^)\s]+)(?:\s+"[^"]*")?\)/g,
+    (full, alt, rawUrl) => {
+      const url2 = rawUrl.trim().replace(/^<|>$/g, "");
+      if (/^(https?:|data:|app:|obsidian:)/i.test(url2))
+        return full;
+      const target = normalizePath(url2);
+      if (!target || !isImagePath(target))
+        return full;
+      const replacement = resolveImageEmbedTarget(target, known, nextKnownIndex, options);
+      if (!replacement)
+        return full;
+      rewrites.push({ from: target, to: replacement });
+      return `![[${replacement}]]`;
+    }
+  );
+  return { text: output, rewrites };
+}
+function attachmentVaultPaths(attachments) {
+  if (!attachments?.length)
+    return [];
+  const seen = /* @__PURE__ */ new Set();
+  const paths = [];
+  for (const item of attachments) {
+    const path2 = normalizePath(item?.path ?? "");
+    if (!path2 || seen.has(path2))
+      continue;
+    seen.add(path2);
+    paths.push(path2);
+  }
+  return paths;
+}
+
 // src/main.ts
 var TEXT_CONTEXT_EXTENSIONS = /* @__PURE__ */ new Set([
   "md",
@@ -22676,7 +22795,7 @@ var GrokBuildPlugin = class extends import_obsidian8.Plugin {
     const referenced = await this.buildReferencedFileContext(uniquePaths);
     const selectionText = this.chatStore.current.includeActiveNote && activeView?.file?.path === activeNotePath ? activeView.editor.getSelection().trim() : "";
     const history = includeHistory ? this.recentConversationText() : "";
-    const imagePaths = attachments.map((item) => item.path);
+    const imagePaths = attachmentVaultPaths(attachments);
     const prompt = [
       "You are Grok Obsidian, a conversational assistant inside an Obsidian vault.",
       "Respond directly with clear Markdown.",
@@ -22702,8 +22821,14 @@ var GrokBuildPlugin = class extends import_obsidian8.Plugin {
       ...referenced.text ? ["--- VAULT CONTEXT ---", referenced.text, "--- END VAULT CONTEXT ---", ""] : [],
       ...imagePaths.length ? [
         "--- ATTACHED IMAGES ---",
-        ...imagePaths,
-        "The image content is attached as ACP image blocks.",
+        "These image files are ALREADY saved in the vault at the vault-relative paths below.",
+        "The binary is also sent as ACP image blocks for vision only \u2014 that is not a separate file path.",
+        "When embedding an image into a note, you MUST use the exact path listed here.",
+        "Correct Obsidian syntax: ![[exact/vault/path.png]]",
+        "Never invent filenames such as image-<uuid>.png, session asset ids, or temporary ACP names.",
+        "Never claim the user must copy the image into the vault; it is already there.",
+        "Attached vault paths:",
+        ...imagePaths.map((path2, index) => `${index + 1}. ${path2}`),
         "--- END IMAGES ---",
         ""
       ] : [],
@@ -22815,9 +22940,11 @@ var GrokBuildPlugin = class extends import_obsidian8.Plugin {
           thoughtText
         });
       } else if (result.ok) {
+        const rawText = result.text || partial2 || "\u4EFB\u52A1\u5DF2\u5B8C\u6210\uFF0C\u4F46\u6CA1\u6709\u8FD4\u56DE\u6587\u5B57\u3002";
+        const fixedText = this.rewriteAssistantImageEmbeds(rawText, attachments);
         this.chatStore.updateMessage(assistant.id, {
           status: "complete",
-          text: result.text || partial2 || "\u4EFB\u52A1\u5DF2\u5B8C\u6210\uFF0C\u4F46\u6CA1\u6709\u8FD4\u56DE\u6587\u5B57\u3002",
+          text: fixedText,
           errorDetails: void 0,
           thoughtText
         });
@@ -23074,7 +23201,11 @@ var GrokBuildPlugin = class extends import_obsidian8.Plugin {
   previewApply(message) {
     const active = this.app.workspace.getActiveFile();
     const fallbackPath = active && !active.path.includes("..") ? active.path : void 0;
-    new ApplyDiffModal(this.app, message.text, fallbackPath, (summary, undo) => {
+    const responseText = this.rewriteAssistantImageEmbeds(
+      message.text,
+      message.retryAttachments ?? []
+    );
+    new ApplyDiffModal(this.app, responseText, fallbackPath, (summary, undo) => {
       const notice = new import_obsidian8.Notice(summary, 6e3);
       if (undo && isUndoEntryValid(undo)) {
         this.lastApplyUndo = undo;
@@ -23087,6 +23218,40 @@ var GrokBuildPlugin = class extends import_obsidian8.Plugin {
         undoButton.addEventListener("click", () => void this.undoApply(undo));
       }
     }, (action, text) => this.writeBackResponse(action, text)).open();
+  }
+  /**
+   * Replace model-invented image embed targets (e.g. image-<uuid>.png) with real
+   * vault attachment paths from the current turn. Also rewrites missing image
+   * targets when the vault cannot resolve them.
+   */
+  rewriteAssistantImageEmbeds(text, attachments) {
+    const knownPaths = attachmentVaultPaths(attachments);
+    if (!text || knownPaths.length === 0)
+      return text;
+    const { text: fixed, rewrites } = rewriteImageEmbeds(text, knownPaths, {
+      pathExists: (vaultRelativePath) => this.vaultPathResolves(vaultRelativePath)
+    });
+    if (rewrites.length > 0) {
+      console.debug(
+        "[Grok Obsidian] rewrote image embeds:",
+        rewrites.map((item) => `${item.from} \u2192 ${item.to}`).join("; ")
+      );
+    }
+    return fixed;
+  }
+  /** True when Obsidian can resolve a wikilink/embed path to an existing file. */
+  vaultPathResolves(vaultRelativePath) {
+    const normalized = vaultRelativePath.replace(/\\/g, "/").replace(/^\/+/, "");
+    if (!normalized)
+      return false;
+    if (this.app.vault.getAbstractFileByPath(normalized) instanceof import_obsidian8.TFile)
+      return true;
+    try {
+      const dest = this.app.metadataCache.getFirstLinkpathDest(normalized, "");
+      return dest instanceof import_obsidian8.TFile;
+    } catch {
+      return false;
+    }
   }
   async undoApply(entry) {
     if (!isUndoEntryValid(entry)) {
