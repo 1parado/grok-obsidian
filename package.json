@@ -1,0 +1,26 @@
+{
+  "name": "obsidian-grok-build",
+  "version": "0.6.0",
+  "description": "Obsidian chat plugin for the local Grok CLI with Vault file mentions",
+  "main": "main.js",
+  "scripts": {
+    "dev": "node esbuild.config.mjs",
+    "build": "tsc -noEmit -skipLibCheck && node esbuild.config.mjs production",
+    "test": "node --test tests/pure.test.mjs"
+  },
+  "keywords": [
+    "obsidian",
+    "grok",
+    "plugin"
+  ],
+  "license": "MIT",
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "esbuild": "^0.20.0",
+    "obsidian": "latest",
+    "typescript": "^5.3.3"
+  },
+  "dependencies": {
+    "@agentclientprotocol/sdk": "^1.2.1"
+  }
+}

@@ -1,0 +1,10 @@
+{
+  "id": "obsidian-grok-build",
+  "name": "Grok Obsidian",
+  "version": "0.6.0",
+  "minAppVersion": "1.5.0",
+  "description": "Chat with the local Grok CLI from Obsidian and reference Vault files with @ mentions.",
+  "author": "Paradox",
+  "authorUrl": "https://github.com/1parado",
+  "isDesktopOnly": true
+}

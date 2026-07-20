@@ -1,0 +1,1204 @@
+/* Grok Obsidian — quiet, icon-led chat panel */
+
+/* Settings: collapsible advanced block */
+.grok-settings-advanced {
+  margin-top: 18px;
+  padding: 10px 12px 4px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 10px;
+  background: var(--background-secondary);
+}
+
+.grok-settings-advanced > summary {
+  cursor: pointer;
+  font-weight: 600;
+  color: var(--text-normal);
+  list-style: none;
+  user-select: none;
+}
+
+.grok-settings-advanced > summary::-webkit-details-marker {
+  display: none;
+}
+
+.grok-settings-advanced > summary::before {
+  content: "▸ ";
+  color: var(--text-muted);
+}
+
+.grok-settings-advanced[open] > summary::before {
+  content: "▾ ";
+}
+
+.grok-settings-advanced-body {
+  margin-top: 8px;
+}
+
+.grok-pet-ribbon img {
+  width: 18px;
+  height: 18px;
+  border-radius: 5px;
+  object-fit: cover;
+}
+
+.grok-pet-view {
+  --grok-violet: #7357ff;
+  --grok-violet-soft: #a997ff;
+  --grok-ink: #12121a;
+  --grok-paper: #fbfbfd;
+  --grok-line: #e8e7ee;
+  display: flex;
+  position: relative;
+  flex-direction: column;
+  height: 100%;
+  min-width: 0;
+  padding: 12px;
+  gap: 12px;
+  overflow: hidden;
+  background: var(--background-primary, var(--grok-paper));
+  color: var(--text-normal, var(--grok-ink));
+}
+
+.grok-pet-header {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: space-between;
+  min-height: 42px;
+  gap: 12px;
+}
+
+.grok-pet-identity {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  gap: 10px;
+}
+
+.grok-pet-avatar {
+  width: 40px;
+  height: 40px;
+  flex: 0 0 40px;
+  border-radius: 11px;
+  object-fit: cover;
+  box-shadow: 0 3px 12px color-mix(in srgb, var(--grok-violet) 16%, transparent);
+  user-select: none;
+}
+
+.grok-pet-avatar.is-active {
+  animation: grok-pet-breathe 1.8s ease-in-out infinite;
+}
+
+@keyframes grok-pet-breathe {
+  0%,
+  100% {
+    transform: scale(1);
+    box-shadow: 0 3px 12px color-mix(in srgb, var(--grok-violet) 16%, transparent);
+  }
+  50% {
+    transform: scale(1.035);
+    box-shadow: 0 4px 18px color-mix(in srgb, var(--grok-violet) 32%, transparent);
+  }
+}
+
+.grok-pet-identity-text {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+
+.grok-pet-title {
+  overflow: hidden;
+  font-family: var(--font-interface);
+  font-size: 0.88rem;
+  font-weight: 650;
+  line-height: 1.15;
+  letter-spacing: 0;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.grok-pet-model {
+  overflow: hidden;
+  color: var(--text-faint);
+  font-family: var(--font-monospace);
+  font-size: 0.6rem;
+  line-height: 1.2;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.grok-pet-stage {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-faint);
+  font-family: var(--font-monospace);
+  font-size: 0.64rem;
+  line-height: 1.2;
+}
+
+.grok-pet-stage::before {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--text-faint);
+  content: "";
+}
+
+.grok-pet-stage.is-starting::before,
+.grok-pet-stage.is-thinking::before,
+.grok-pet-stage.is-writing::before {
+  background: var(--grok-violet-soft);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--grok-violet) 12%, transparent);
+  animation: grok-pet-status 1.2s ease-in-out infinite;
+}
+
+.grok-pet-stage.is-error {
+  color: var(--text-error);
+}
+
+.grok-pet-stage.is-error::before {
+  background: var(--text-error);
+}
+
+@keyframes grok-pet-status {
+  50% {
+    opacity: 0.38;
+  }
+}
+
+.grok-pet-icon-button {
+  width: 30px;
+  height: 30px;
+  flex: 0 0 30px;
+  border-radius: 9px;
+  color: var(--text-muted);
+}
+
+.grok-pet-icon-button:hover:not(:disabled) {
+  color: var(--text-normal);
+  background: var(--background-modifier-hover);
+}
+
+.grok-pet-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.grok-pet-chat {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-height: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+  padding: 4px 2px 8px;
+  gap: 14px;
+  scroll-behavior: smooth;
+  scrollbar-width: thin;
+}
+
+.grok-pet-message {
+  display: flex;
+  align-items: flex-start;
+  width: 100%;
+  gap: 8px;
+}
+
+.grok-pet-message.is-user {
+  justify-content: flex-end;
+}
+
+.grok-pet-message-avatar {
+  width: 23px;
+  height: 23px;
+  flex: 0 0 23px;
+  margin-top: 2px;
+  border-radius: 7px;
+  object-fit: cover;
+}
+
+.grok-pet-message-body {
+  display: flex;
+  min-width: 0;
+  max-width: calc(100% - 31px);
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+}
+
+.grok-pet-message.is-user .grok-pet-message-body {
+  max-width: 86%;
+  align-items: flex-end;
+}
+
+.grok-pet-message-text {
+  max-width: 100%;
+  padding: 9px 11px;
+  border: 1px solid color-mix(in srgb, var(--background-modifier-border, var(--grok-line)) 72%, transparent);
+  border-radius: 4px 13px 13px 13px;
+  background: var(--background-secondary);
+  font-family: var(--font-text);
+  font-size: 0.82rem;
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+}
+
+.grok-pet-message.is-user .grok-pet-message-text {
+  max-width: 100%;
+  border-color: color-mix(in srgb, var(--grok-violet) 24%, var(--background-modifier-border));
+  border-radius: 13px 4px 13px 13px;
+  background: color-mix(in srgb, var(--grok-violet) 12%, var(--background-primary));
+  white-space: pre-wrap;
+}
+
+.grok-pet-message.is-streaming .grok-pet-message-text::after {
+  display: inline-block;
+  width: 5px;
+  height: 1em;
+  margin-left: 3px;
+  border-radius: 2px;
+  background: var(--grok-violet-soft);
+  vertical-align: -0.15em;
+  content: "";
+  animation: grok-pet-status 0.9s ease-in-out infinite;
+}
+
+.grok-pet-message.is-error .grok-pet-message-text {
+  border-color: color-mix(in srgb, var(--text-error) 45%, var(--background-modifier-border));
+}
+
+.grok-pet-message-attachments {
+  display: flex;
+  max-width: 100%;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.grok-pet-message-attachments img {
+  width: 96px;
+  height: 72px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 8px;
+  object-fit: cover;
+}
+
+.grok-pet-message-actions {
+  display: flex;
+  min-height: 26px;
+  align-items: center;
+  gap: 1px;
+  opacity: 0;
+  transition: opacity 120ms ease;
+}
+
+.grok-pet-message-model {
+  color: var(--text-faint);
+  font-family: var(--font-monospace);
+  font-size: 0.62rem;
+  line-height: 1.2;
+}
+
+.grok-pet-error-details {
+  width: 100%;
+  max-width: 100%;
+  padding: 6px 8px;
+  border-left: 2px solid var(--text-error);
+  color: var(--text-muted);
+  font-size: 0.68rem;
+}
+
+.grok-pet-error-details summary {
+  cursor: pointer;
+  color: var(--text-error);
+}
+
+.grok-pet-error-details pre {
+  max-height: 180px;
+  margin: 7px 0 0;
+  padding: 8px;
+  overflow: auto;
+  border-radius: 6px;
+  background: var(--background-secondary);
+  color: var(--text-muted);
+  font-family: var(--font-monospace);
+  font-size: 0.65rem;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+.grok-pet-message:hover .grok-pet-message-actions,
+.grok-pet-message:focus-within .grok-pet-message-actions {
+  opacity: 1;
+}
+
+.grok-pet-message-action {
+  width: 26px;
+  height: 26px;
+  flex-basis: 26px;
+  border-radius: 7px;
+}
+
+.grok-pet-sources {
+  display: flex;
+  max-width: 100%;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.grok-pet-sources button {
+  display: inline-flex;
+  width: auto;
+  max-width: 170px;
+  min-height: 24px;
+  align-items: center;
+  margin: 0;
+  padding: 2px 7px;
+  gap: 4px;
+  overflow: hidden;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 7px;
+  background: transparent;
+  box-shadow: none;
+  color: var(--text-muted);
+  font-size: 0.66rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.grok-pet-sources button:hover {
+  border-color: color-mix(in srgb, var(--grok-violet) 42%, var(--background-modifier-border));
+  color: var(--text-normal);
+}
+
+.grok-pet-sources svg {
+  width: 12px;
+  height: 12px;
+  flex: 0 0 12px;
+}
+
+.grok-pet-file-pill {
+  display: inline-flex;
+  align-items: center;
+  margin: 0 2px;
+  padding: 1px 5px;
+  border: 1px solid color-mix(in srgb, var(--grok-violet) 28%, transparent);
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--grok-violet) 14%, transparent);
+  color: color-mix(in srgb, var(--grok-violet-soft) 72%, var(--text-normal));
+  font-family: var(--font-interface);
+  font-size: 0.76rem;
+  font-weight: 600;
+  line-height: 1.35;
+  vertical-align: baseline;
+  white-space: nowrap;
+}
+
+.grok-pet-message-text > :first-child {
+  margin-top: 0;
+}
+
+.grok-pet-message-text > :last-child {
+  margin-bottom: 0;
+}
+
+.grok-pet-message-text p,
+.grok-pet-message-text ul,
+.grok-pet-message-text ol,
+.grok-pet-message-text pre {
+  margin-block: 0.45em;
+}
+
+.grok-pet-message-text pre {
+  padding: 8px;
+  border-radius: 8px;
+  font-size: 0.76rem;
+}
+
+.grok-pet-composer-shell {
+  position: relative;
+  flex: 0 0 auto;
+}
+
+.grok-pet-turn-summary {
+  flex: 0 0 auto;
+  margin: 0 0 2px;
+  padding: 4px 2px 0;
+  color: var(--text-muted);
+  font-size: 0.7rem;
+  line-height: 1.35;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.grok-pet-turn-summary.is-truncated {
+  color: var(--text-warning, #c98600);
+  font-weight: 600;
+}
+
+.grok-pet-context-chip.is-empty {
+  border-style: dashed;
+  opacity: 0.9;
+}
+
+.grok-pet-context-rail {
+  display: flex;
+  min-height: 0;
+  align-items: center;
+  margin-bottom: 6px;
+  gap: 6px;
+  overflow-x: auto;
+  scrollbar-width: thin;
+}
+
+.grok-pet-context-chip {
+  display: inline-flex;
+  width: auto;
+  min-height: 28px;
+  flex: 0 0 auto;
+  align-items: center;
+  margin: 0;
+  padding: 3px 8px;
+  gap: 5px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 9px;
+  background: transparent;
+  box-shadow: none;
+  color: var(--text-faint);
+  font-size: 0.68rem;
+}
+
+.grok-pet-context-chip.is-active {
+  border-color: color-mix(in srgb, var(--grok-violet) 38%, var(--background-modifier-border));
+  background: color-mix(in srgb, var(--grok-violet) 9%, transparent);
+  color: var(--text-normal);
+}
+
+.grok-pet-context-chip svg {
+  width: 13px;
+  height: 13px;
+}
+
+.grok-pet-draft-context {
+  display: inline-flex;
+  min-height: 28px;
+  flex: 0 0 auto;
+  align-items: center;
+  padding: 3px 4px 3px 7px;
+  gap: 4px;
+  border: 1px solid color-mix(in srgb, var(--grok-violet) 28%, var(--background-modifier-border));
+  border-radius: 9px;
+  background: color-mix(in srgb, var(--grok-violet) 8%, transparent);
+  color: var(--text-muted);
+  font-size: 0.66rem;
+}
+
+.grok-pet-draft-context > svg,
+.grok-pet-draft-context > span:first-child svg {
+  width: 12px;
+  height: 12px;
+}
+
+.grok-pet-draft-remove {
+  display: grid;
+  width: 18px;
+  height: 18px;
+  min-width: 18px;
+  min-height: 18px;
+  place-items: center;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  box-shadow: none;
+  color: var(--text-faint);
+}
+
+.grok-pet-draft-remove:hover {
+  background: var(--background-modifier-hover);
+  color: var(--text-normal);
+}
+
+.grok-pet-draft-remove svg {
+  width: 10px;
+  height: 10px;
+}
+
+.grok-pet-attachment-chip {
+  position: relative;
+  width: 42px;
+  height: 32px;
+  flex: 0 0 42px;
+}
+
+.grok-pet-attachment-chip > img {
+  width: 100%;
+  height: 100%;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 8px;
+  object-fit: cover;
+}
+
+.grok-pet-chip-remove {
+  position: absolute;
+  top: -5px;
+  right: -5px;
+  display: grid;
+  width: 17px;
+  height: 17px;
+  min-width: 17px;
+  min-height: 17px;
+  place-items: center;
+  margin: 0;
+  padding: 0;
+  border: 1px solid var(--background-primary);
+  border-radius: 50%;
+  background: var(--background-modifier-error);
+  color: var(--text-on-accent);
+}
+
+.grok-pet-chip-remove svg {
+  width: 10px;
+  height: 10px;
+}
+
+.grok-pet-drop-target {
+  position: absolute;
+  inset: 58px 10px 70px;
+  z-index: 40;
+  display: grid;
+  place-items: center;
+  border: 1px dashed var(--grok-violet-soft);
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--background-primary) 90%, var(--grok-violet));
+  color: var(--text-accent);
+  font-size: 0.78rem;
+  font-weight: 600;
+  pointer-events: none;
+}
+
+.grok-pet-drop-target[hidden] {
+  display: none;
+}
+
+.grok-pet-mention-menu {
+  position: absolute;
+  right: 0;
+  bottom: calc(100% + 8px);
+  left: 0;
+  z-index: 20;
+  display: flex;
+  flex-direction: column;
+  max-height: min(260px, 42vh);
+  padding: 5px;
+  overflow-x: hidden;
+  overflow-y: auto;
+  border: 1px solid var(--background-modifier-border, var(--grok-line));
+  border-radius: 13px;
+  background: var(--background-primary);
+  box-shadow: 0 12px 30px color-mix(in srgb, var(--grok-ink) 18%, transparent);
+  scrollbar-width: thin;
+}
+
+.grok-pet-mention-menu[hidden] {
+  display: none;
+}
+
+.grok-pet-mention-item {
+  display: flex;
+  width: 100%;
+  min-height: 42px;
+  flex: 0 0 auto;
+  align-items: center;
+  margin: 0;
+  padding: 6px 8px;
+  gap: 9px;
+  overflow: hidden;
+  border: 0;
+  border-radius: 9px;
+  background: transparent;
+  box-shadow: none;
+  color: var(--text-normal);
+  text-align: left;
+}
+
+.grok-pet-mention-item:hover,
+.grok-pet-mention-item.is-selected {
+  background: color-mix(in srgb, var(--grok-violet) 10%, var(--background-modifier-hover));
+}
+
+.grok-pet-mention-item.is-selected {
+  box-shadow: inset 2px 0 0 var(--grok-violet);
+}
+
+.grok-pet-mention-icon {
+  display: grid;
+  width: 24px;
+  height: 24px;
+  flex: 0 0 24px;
+  place-items: center;
+  border-radius: 7px;
+  background: color-mix(in srgb, var(--grok-violet) 10%, var(--background-secondary));
+  color: var(--grok-violet-soft);
+}
+
+.grok-pet-mention-icon svg {
+  width: 14px;
+  height: 14px;
+}
+
+.grok-pet-mention-labels {
+  display: grid;
+  min-width: 0;
+  flex: 1;
+  gap: 1px;
+}
+
+.grok-pet-mention-name,
+.grok-pet-mention-path {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.grok-pet-mention-name {
+  font-family: var(--font-interface);
+  font-size: 0.78rem;
+  font-weight: 560;
+}
+
+.grok-pet-mention-path {
+  color: var(--text-faint);
+  font-family: var(--font-monospace);
+  font-size: 0.61rem;
+}
+
+.grok-pet-mention-preview {
+  display: -webkit-box;
+  margin-top: 4px;
+  overflow: hidden;
+  color: var(--text-muted);
+  font-family: var(--font-text);
+  font-size: 0.68rem;
+  font-weight: 400;
+  line-height: 1.4;
+  white-space: normal;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.grok-pet-mention-empty {
+  padding: 18px 10px;
+  color: var(--text-muted);
+  font-size: 0.76rem;
+  text-align: center;
+}
+
+.grok-pet-composer {
+  display: flex;
+  width: 100%;
+  align-items: flex-end;
+  min-height: 44px;
+  padding: 5px 5px 5px 11px;
+  gap: 8px;
+  border: 1px solid var(--background-modifier-border, var(--grok-line));
+  border-radius: 15px;
+  background: var(--background-primary-alt, var(--grok-paper));
+  transition: border-color 140ms ease, box-shadow 140ms ease;
+}
+
+.grok-pet-composer:focus-within {
+  border-color: color-mix(in srgb, var(--grok-violet) 72%, var(--background-modifier-border));
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--grok-violet) 10%, transparent);
+}
+
+.grok-pet-file-input {
+  display: none;
+}
+
+.grok-pet-attach-button {
+  display: grid;
+  width: 30px;
+  height: 30px;
+  flex: 0 0 30px;
+  place-items: center;
+  margin: 1px 0;
+  padding: 0;
+  border-radius: 9px;
+  color: var(--text-faint);
+}
+
+.grok-pet-attach-button:hover:not(:disabled),
+.grok-pet-attach-button:focus-visible {
+  color: var(--text-normal);
+  background: var(--background-modifier-hover);
+}
+
+.grok-pet-attach-button svg {
+  width: 15px;
+  height: 15px;
+}
+
+.grok-pet-input {
+  width: 100%;
+  min-width: 0;
+  min-height: 32px;
+  max-height: 144px;
+  margin: 0;
+  padding: 6px 0 5px;
+  resize: none;
+  overflow-y: auto;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  box-shadow: none;
+  color: var(--text-normal);
+  font-family: var(--font-text);
+  font-size: 0.84rem;
+  line-height: 1.45;
+}
+
+.grok-pet-input:focus {
+  border: 0;
+  box-shadow: none;
+}
+
+.grok-pet-input::placeholder {
+  color: var(--text-faint);
+}
+
+.grok-pet-action {
+  display: grid;
+  width: 32px;
+  height: 32px;
+  flex: 0 0 32px;
+  place-items: center;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 10px;
+  background: var(--grok-violet);
+  box-shadow: none;
+  color: #fff;
+  transition: transform 120ms ease, filter 120ms ease;
+}
+
+.grok-pet-action:hover {
+  background: var(--grok-violet);
+  filter: brightness(1.08);
+  transform: translateY(-1px);
+}
+
+.grok-pet-action:focus-visible {
+  outline: 2px solid var(--grok-violet-soft);
+  outline-offset: 2px;
+}
+
+.grok-pet-action.is-stop {
+  background: var(--text-error);
+}
+
+.grok-pet-action svg {
+  width: 15px;
+  height: 15px;
+  stroke-width: 2.2;
+}
+
+.grok-history-modal {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  max-height: min(78vh, 640px);
+}
+
+.grok-history-hint,
+.grok-history-empty {
+  color: var(--text-muted);
+  font-size: 0.78rem;
+  line-height: 1.4;
+}
+
+.grok-history-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  overflow: auto;
+  min-height: 120px;
+  max-height: min(56vh, 480px);
+  padding-right: 2px;
+}
+
+.grok-history-row {
+  display: flex;
+  align-items: stretch;
+  gap: 6px;
+}
+
+.grok-history-row .grok-history-main {
+  flex: 1 1 auto;
+}
+
+.grok-history-main {
+  flex: 1 1 auto;
+  min-width: 0;
+  margin: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 10px;
+  background: var(--background-secondary);
+  text-align: left;
+  cursor: pointer;
+}
+
+.grok-history-main:hover,
+.grok-history-main:focus-visible {
+  border-color: color-mix(in srgb, var(--grok-violet) 45%, var(--background-modifier-border));
+  background: var(--background-modifier-hover);
+}
+
+.grok-history-title {
+  color: var(--text-normal);
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.grok-history-meta {
+  margin-top: 2px;
+  color: var(--text-muted);
+  font-size: 0.72rem;
+}
+
+.grok-history-search {
+  width: 100%;
+  margin: 0 0 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 8px;
+  background: var(--background-primary);
+  color: var(--text-normal);
+  font-size: 0.84rem;
+}
+
+.grok-history-actions {
+  display: flex;
+  flex: 0 0 auto;
+  gap: 4px;
+  align-items: stretch;
+}
+
+.grok-history-action {
+  flex: 0 0 34px;
+  width: 34px;
+  margin: 0;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 10px;
+  color: var(--text-muted);
+  background: var(--background-secondary);
+}
+
+.grok-history-action:hover,
+.grok-history-action:focus-visible {
+  color: var(--text-normal);
+  background: var(--background-modifier-hover);
+}
+
+.grok-history-delete {
+  flex: 0 0 34px;
+  width: 34px;
+  height: auto;
+  margin: 0;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 10px;
+  color: var(--text-muted);
+  background: var(--background-secondary);
+}
+
+.grok-history-delete:hover,
+.grok-history-delete:focus-visible {
+  color: var(--text-error);
+  border-color: color-mix(in srgb, var(--text-error) 40%, var(--background-modifier-border));
+}
+
+.grok-pet-status-banner {
+  margin: 0 0 6px;
+  padding: 4px 8px;
+  border-radius: 6px;
+  font-size: 0.72rem;
+  line-height: 1.35;
+}
+
+.grok-pet-status-banner.is-cancelled {
+  background: color-mix(in srgb, var(--text-muted) 14%, transparent);
+  color: var(--text-muted);
+}
+
+.grok-pet-status-banner.is-error {
+  background: color-mix(in srgb, var(--text-error) 12%, transparent);
+  color: var(--text-error);
+}
+
+.grok-pet-message.is-cancelled .grok-pet-message-text {
+  opacity: 0.92;
+}
+
+.grok-pet-thought {
+  margin: 0 0 8px;
+  padding: 6px 8px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 8px;
+  background: var(--background-secondary);
+  font-size: 0.74rem;
+  color: var(--text-muted);
+}
+
+.grok-pet-thought > summary {
+  cursor: pointer;
+  user-select: none;
+  color: var(--text-muted);
+  font-weight: 500;
+}
+
+.grok-pet-thought-body {
+  margin: 6px 0 0;
+  padding: 0;
+  max-height: 160px;
+  overflow: auto;
+  white-space: pre-wrap;
+  font-family: var(--font-interface);
+  font-size: 0.72rem;
+  line-height: 1.4;
+  color: var(--text-muted);
+}
+
+.grok-pet-thinking-placeholder {
+  margin: 0 0 6px;
+  color: var(--text-faint);
+  font-size: 0.78rem;
+  font-style: italic;
+}
+
+.grok-pet-open-tab {
+  max-width: 9em;
+}
+
+.grok-diff-file-row.is-applied {
+  opacity: 0.72;
+  border-style: dashed;
+}
+
+.grok-diff-file-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.grok-diff-file-actions button {
+  margin: 0;
+}
+
+.grok-diff-footer {
+  flex: 0 0 auto;
+  margin-top: 4px;
+}
+
+/* Outer Obsidian .modal shell — this is what actually limits width. */
+.modal.grok-diff-modal-window {
+  width: min(96vw, 1280px);
+  max-width: min(96vw, 1280px);
+  height: min(92vh, 900px);
+  max-height: min(92vh, 900px);
+}
+
+.modal.grok-diff-modal-window .modal-content {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  max-height: 100%;
+  overflow: hidden;
+}
+
+.grok-diff-modal {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  flex: 1 1 auto;
+  min-height: 0;
+  width: 100%;
+  height: 100%;
+  max-height: 100%;
+  overflow: hidden;
+}
+
+.grok-diff-hint {
+  flex: 0 0 auto;
+  margin-top: -4px;
+  color: var(--text-muted);
+  font-size: 0.78rem;
+  line-height: 1.4;
+}
+
+.grok-diff-body {
+  display: grid;
+  grid-template-columns: minmax(220px, 320px) minmax(0, 1fr);
+  gap: 12px;
+  flex: 1 1 auto;
+  min-height: 0;
+  height: 100%;
+}
+
+.grok-diff-file-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-height: 0;
+  overflow: auto;
+  padding-right: 2px;
+}
+
+.grok-diff-file-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin: 0;
+  padding: 8px 10px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 10px;
+  background: var(--background-secondary);
+  cursor: pointer;
+}
+
+.grok-diff-file-row.is-active {
+  border-color: color-mix(in srgb, var(--grok-violet) 50%, var(--background-modifier-border));
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--grok-violet) 25%, transparent);
+}
+
+.grok-diff-file-row.is-error {
+  opacity: 0.85;
+}
+
+.grok-diff-file-row input[type="checkbox"] {
+  margin-top: 3px;
+}
+
+.grok-diff-file-main {
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.grok-diff-file-path {
+  color: var(--text-normal);
+  font-family: var(--font-monospace);
+  font-size: 0.74rem;
+  font-weight: 600;
+  word-break: break-all;
+}
+
+.grok-diff-file-meta {
+  margin-top: 2px;
+  color: var(--text-muted);
+  font-size: 0.7rem;
+  line-height: 1.35;
+}
+
+.grok-diff-detail {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.grok-diff-target {
+  margin: 0 0 8px;
+  color: var(--text-muted);
+  font-family: var(--font-monospace);
+  font-size: 0.72rem;
+}
+
+.grok-diff-stats,
+.grok-diff-empty {
+  margin: 0 0 10px;
+  color: var(--text-muted);
+  font-size: 0.78rem;
+  line-height: 1.4;
+}
+
+.grok-diff-preview {
+  flex: 1 1 auto;
+  min-height: 280px;
+  margin: 0;
+  padding: 12px 14px;
+  overflow: auto;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 8px;
+  background: var(--background-secondary);
+  font-family: var(--font-monospace);
+  font-size: 0.8rem;
+  line-height: 1.5;
+  white-space: pre;
+}
+
+.grok-diff-line {
+  min-height: 1.45em;
+  padding: 0 4px;
+}
+
+.grok-diff-line.is-added {
+  background: color-mix(in srgb, var(--color-green) 16%, transparent);
+  color: var(--color-green);
+}
+
+.grok-diff-line.is-removed {
+  background: color-mix(in srgb, var(--color-red) 14%, transparent);
+  color: var(--color-red);
+}
+
+.grok-diff-modal > .setting-item {
+  flex: 0 0 auto;
+}
+
+@media (max-width: 900px) {
+  .modal.grok-diff-modal-window {
+    width: min(98vw, 1280px);
+    max-width: min(98vw, 1280px);
+    height: min(94vh, 900px);
+  }
+
+  .grok-diff-body {
+    grid-template-columns: 1fr;
+  }
+
+  .grok-diff-file-list {
+    max-height: 160px;
+  }
+}
+
+@media (max-width: 280px) {
+  .grok-pet-view {
+    padding: 10px;
+  }
+
+  .grok-pet-message-text {
+    max-width: calc(100% - 29px);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .grok-pet-avatar,
+  .grok-pet-stage::before,
+  .grok-pet-chat,
+  .grok-pet-action,
+  .grok-pet-composer {
+    animation: none !important;
+    scroll-behavior: auto;
+    transition: none;
+  }
+}
